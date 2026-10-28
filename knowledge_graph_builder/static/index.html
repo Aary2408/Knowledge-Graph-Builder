@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f7fa">
+  <title>KnowGraph AI</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="#" data-page="overview" aria-label="KnowGraph AI overview">
+        <span class="brand-mark"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 16 16 6l9 10-9 10-9-10Z"/><circle cx="7" cy="16" r="2"/><circle cx="16" cy="6" r="2"/><circle cx="25" cy="16" r="2"/><circle cx="16" cy="26" r="2"/><circle cx="16" cy="16" r="2"/></svg></span>
+        <span><strong>KnowGraph</strong><small>RESEARCH WORKSPACE</small></span>
+      </a>
+      <div class="workspace-label">WORKSPACE</div>
+      <nav class="navigation" aria-label="Main navigation">
+        <button class="nav-item active" data-page="overview"><span class="nav-icon">◫</span>Overview</button>
+        <button class="nav-item" data-page="graph"><span class="nav-icon">⌘</span>Knowledge graph</button>
+        <button class="nav-item" data-page="documents"><span class="nav-icon">▤</span>Documents</button>
+        <button class="nav-item" data-page="verification"><span class="nav-icon">✓</span>Claim verification</button>
+        <button class="nav-item" data-page="assistant"><span class="nav-icon">✳</span>GraphRAG assistant</button>
+        <button class="nav-item" data-page="evidence"><span class="nav-icon">⌕</span>Evidence explorer</button>
+        <div class="workspace-label nav-spacer">MODEL DEVELOPMENT</div>
+        <button class="nav-item" data-page="model-lab"><span class="nav-icon">⚗</span>Model Lab</button>
+        <button class="nav-item" data-page="datasets"><span class="nav-icon">▦</span>Dataset manager</button>
+        <button class="nav-item" data-page="experiments"><span class="nav-icon">◷</span>Experiments</button>
+        <div class="nav-bottom">
+          <button class="nav-item" data-page="settings"><span class="nav-icon">⚙</span>Settings</button>
+        </div>
+      </nav>
+      <div class="sidebar-footer">
+        <span class="status-dot"></span>
+        <span><strong>Local workspace</strong><small id="sidebar-status">Connecting to API…</small></span>
+        <button class="icon-button" id="refresh-button" title="Refresh data" aria-label="Refresh data">↻</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-button menu-button" id="menu-button" aria-label="Toggle navigation">☰</button>
+        <div class="breadcrumbs"><span>KnowGraph AI</span><span class="crumb-separator">/</span><strong id="page-title">Overview</strong></div>
+        <div class="topbar-right">
+          <span class="environment-pill"><span class="status-dot"></span><span id="api-status">Checking API</span></span>
+          <span class="avatar" title="Local workspace">KG</span>
+        </div>
+      </header>
+      <section id="page-content" class="page-content" aria-live="polite">
+        <div class="loading-state"><span class="spinner"></span>Loading workspace data</div>
+      </section>
+      <div id="toast" class="toast" role="status"></div>
+    </main>
+  </div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+{
+  "synthetic": true,
+  "examples": [
+    {"text": "Alice works at Acme.", "ner_tokens": ["Alice", "works", "at", "Acme."], "ner_tags": ["B-PERSON", "O", "O", "B-ORG"], "relations": [{"subject": {"start": 0, "end": 5}, "object": {"start": 15, "end": 19}, "label": "works_at"}]},
+    {"text": "Bob lives in Paris.", "ner_tokens": ["Bob", "lives", "in", "Paris."], "ner_tags": ["B-PERSON", "O", "O", "B-LOCATION"], "relations": [{"subject": {"start": 0, "end": 3}, "object": {"start": 13, "end": 18}, "label": "located_in"}]},
+    {"text": "Carol works at Globex.", "ner_tokens": ["Carol", "works", "at", "Globex."], "ner_tags": ["B-PERSON", "O", "O", "B-ORG"], "relations": [{"subject": {"start": 0, "end": 5}, "object": {"start": 15, "end": 21}, "label": "works_at"}]},
+    {"text": "Dave lives in London.", "ner_tokens": ["Dave", "lives", "in", "London."], "ner_tags": ["B-PERSON", "O", "O", "B-LOCATION"], "relations": [{"subject": {"start": 0, "end": 4}, "object": {"start": 14, "end": 20}, "label": "located_in"}]},
+    {"text": "Erin works at Initech.", "ner_tokens": ["Erin", "works", "at", "Initech."], "ner_tags": ["B-PERSON", "O", "O", "B-ORG"], "relations": [{"subject": {"start": 0, "end": 4}, "object": {"start": 14, "end": 21}, "label": "works_at"}]},
+    {"text": "Frank lives in Berlin.", "ner_tokens": ["Frank", "lives", "in", "Berlin."], "ner_tags": ["B-PERSON", "O", "O", "B-LOCATION"], "relations": [{"subject": {"start": 0, "end": 5}, "object": {"start": 15, "end": 21}, "label": "located_in"}]},
+    {"text": "Grace works at Umbrella.", "ner_tokens": ["Grace", "works", "at", "Umbrella."], "ner_tags": ["B-PERSON", "O", "O", "B-ORG"], "relations": [{"subject": {"start": 0, "end": 5}, "object": {"start": 15, "end": 23}, "label": "works_at"}]},
+    {"text": "Henry lives in Rome.", "ner_tokens": ["Henry", "lives", "in", "Rome."], "ner_tags": ["B-PERSON", "O", "O", "B-LOCATION"], "relations": [{"subject": {"start": 0, "end": 5}, "object": {"start": 13, "end": 18}, "label": "located_in"}]},
+    {"text": "Ivy works at Hooli.", "ner_tokens": ["Ivy", "works", "at", "Hooli."], "ner_tags": ["B-PERSON", "O", "O", "B-ORG"], "relations": [{"subject": {"start": 0, "end": 3}, "object": {"start": 13, "end": 18}, "label": "works_at"}]},
+    {"text": "Jack lives in Oslo.", "ner_tokens": ["Jack", "lives", "in", "Oslo."], "ner_tags": ["B-PERSON", "O", "O", "B-LOCATION"], "relations": [{"subject": {"start": 0, "end": 4}, "object": {"start": 14, "end": 18}, "label": "located_in"}]},
+    {"text": "Kelly works at Stark.", "ner_tokens": ["Kelly", "works", "at", "Stark."], "ner_tags": ["B-PERSON", "O", "O", "B-ORG"], "relations": [{"subject": {"start": 0, "end": 5}, "object": {"start": 15, "end": 20}, "label": "works_at"}]},
+    {"text": "Leo lives in Madrid.", "ner_tokens": ["Leo", "lives", "in", "Madrid."], "ner_tags": ["B-PERSON", "O", "O", "B-LOCATION"], "relations": [{"subject": {"start": 0, "end": 3}, "object": {"start": 13, "end": 19}, "label": "located_in"}]},
+    {"text": "Alice visited Acme.", "ner_tokens": ["Alice", "visited", "Acme."], "ner_tags": ["B-PERSON", "O", "B-ORG"], "relations": [{"subject": {"start": 0, "end": 5}, "object": {"start": 14, "end": 19}, "label": "NO_RELATION"}]},
+    {"text": "Bob met Paris.", "ner_tokens": ["Bob", "met", "Paris."], "ner_tags": ["B-PERSON", "O", "B-LOCATION"], "relations": [{"subject": {"start": 0, "end": 3}, "object": {"start": 8, "end": 13}, "label": "NO_RELATION"}]},
+    {"text": "Carol called Globex.", "ner_tokens": ["Carol", "called", "Globex."], "ner_tags": ["B-PERSON", "O", "B-ORG"], "relations": [{"subject": {"start": 0, "end": 5}, "object": {"start": 13, "end": 20}, "label": "NO_RELATION"}]},
+    {"text": "Dave visited London.", "ner_tokens": ["Dave", "visited", "London."], "ner_tags": ["B-PERSON", "O", "B-LOCATION"], "relations": [{"subject": {"start": 0, "end": 4}, "object": {"start": 13, "end": 20}, "label": "NO_RELATION"}]},
+    {"text": "Erin knows Initech.", "ner_tokens": ["Erin", "knows", "Initech."], "ner_tags": ["B-PERSON", "O", "B-ORG"], "relations": [{"subject": {"start": 0, "end": 4}, "object": {"start": 11, "end": 19}, "label": "NO_RELATION"}]},
+    {"text": "Frank saw Berlin.", "ner_tokens": ["Frank", "saw", "Berlin."], "ner_tags": ["B-PERSON", "O", "B-LOCATION"], "relations": [{"subject": {"start": 0, "end": 5}, "object": {"start": 10, "end": 17}, "label": "NO_RELATION"}]}
+  ]
+}
