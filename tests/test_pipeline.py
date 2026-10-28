@@ -230,16 +230,24 @@ def test_uploaded_document_is_chunk_extracted_reviewed_and_saved_to_graph(tmp_pa
     })
     assert extracted.status_code == 200
     assert extracted.json["inserted_into_graph"] is False
+    assert extracted.json["candidates_in_graph"] is True
+    assert extracted.json["graph_candidate_count"] == 1
     assert extracted.json["candidate_relations"][0]["label"] == "works_at"
-    assert extracted.json["candidate_relations"][0]["source_offsets"] == {"start": 0, "end": 17}
+    assert extracted.json["candidate_relations"][0]["source_offsets"] == {"start": 0, "end": 18}
+    assert extracted.json["candidate_relations"][0]["evidence_snippet"] == "Ada works at Acme."
     assert len(calls) >= 2
-    assert extracted.json["candidate_relations"][-1]["source_offsets"]["start"] > 1200
+    assert extracted.json["candidate_relations"][-1]["subject_offsets"]["start"] > 1200
+    graph_before_review = client.get("/graph").json
+    assert len(graph_before_review["relations"]) == 1
+    assert all(item["relation_type"] == "candidate" for item in graph_before_review["relations"])
+    assert graph_before_review["entities"]
     reviewed = client.post("/documents/doc-upload/review", json={"candidate_index": 0, "decision": "approve"})
     assert reviewed.status_code == 200
     assert reviewed.json["inserted"] is True
     relation = client.get("/graph").json["relations"][0]
     assert relation["relation_type"] == "human_reviewed"
     assert relation["provenance"]["document_id"] == "doc-upload"
+    assert len(client.get("/graph").json["relations"]) == 1
 
 
 def test_document_upload_rejects_unsupported_invalid_and_oversized_files(tmp_path):
@@ -341,13 +349,17 @@ def test_frontend_and_document_api_persist_local_state(tmp_path):
         settings,
     )
     client = app.test_client()
-    assert client.get("/").status_code == 200
-    assert b"KnowGraph AI" in client.get("/").data
+    page = client.get("/")
+    assert page.status_code == 200
+    assert b"KnowGraph AI" in page.data
+    assert page.data.count(b'class="nav-item') == 5
+    assert all(label in page.data for label in (b"Home", b"Documents", b"Knowledge Graph", b"Ask AI", b"Advanced Lab"))
     assert client.get("/static/app.css").status_code == 200
     assert client.get("/static/app.js").status_code == 200
     created = client.post("/documents", json={"document_id": "doc-local", "text": "Ada works at Acme."})
     assert created.status_code == 201
     assert created.json["document"]["status"] == "stored"
+    assert client.get("/documents/doc-local").json["document"]["text"] == "Ada works at Acme."
     assert client.get("/overview").json["documents"] == 1
     client.post("/graph/fact", json={
         "subject": "Ada", "predicate": "works_at", "object": "Acme",
@@ -780,9 +792,229 @@ def test_document_extraction_reports_missing_task_checkpoints(tmp_path):
     stored = client.post("/documents", json={"document_id": "doc-needs-models", "text": "Source text."})
     assert stored.status_code == 201
     response = client.post("/documents/extract", json={"document_id": "doc-needs-models"})
-    assert response.status_code == 400
-    assert "NER, relation" in response.json["error"]
-    assert "Model Lab" in response.json["error"]
+    assert response.status_code == 200
+    assert response.json["status"] == "ready"
+    assert response.json["extraction"]["method"] == "lightweight_rule_based"
+
+
+def test_document_upload_analysis_qa_review_and_reopen_without_checkpoints(tmp_path):
+    graph_path = tmp_path / "graph.json"
+    documents_path = tmp_path / "documents.json"
+    settings = {
+        "nlp_checkpoint_dir": str(tmp_path / "nlp"),
+        "graph_path": str(graph_path),
+        "documents_path": str(documents_path),
+        "uploads_path": str(tmp_path / "uploads"),
+        "experiment_dir": str(tmp_path / "experiments"),
+    }
+    app = create_app(KnowledgeGraph("document-journey"), settings)
+    client = app.test_client()
+    text = "Ada Lovelace works at Acme. She leads a research team."
+    uploaded = client.post(
+        "/documents/upload",
+        data={"document_id": "journey-doc", "file": (BytesIO(text.encode()), "report.txt")},
+        content_type="multipart/form-data",
+    )
+    assert uploaded.status_code == 201
+    assert uploaded.json["document"]["processing_status"] == "uploaded"
+
+    analyzed = client.post("/documents/extract", json={"document_id": "journey-doc"})
+    assert analyzed.status_code == 200
+    assert analyzed.json["status"] == "ready"
+    assert analyzed.json["summary"].startswith("Ada Lovelace works at Acme.")
+    assert analyzed.json["extraction"]["method"] == "lightweight_rule_based"
+    assert analyzed.json["entities"][0]["text"] == "Ada Lovelace"
+    candidate = analyzed.json["candidate_relations"][0]
+    assert (candidate["subject"], candidate["label"], candidate["object"]) == ("Ada Lovelace", "works_at", "Acme")
+    assert candidate["evidence_snippet"] == "Ada Lovelace works at Acme."
+    assert candidate["document_id"] == "journey-doc"
+    assert candidate["extraction_method"] == "lightweight_rule_based"
+    assert analyzed.json["inserted_into_graph"] is False
+    assert analyzed.json["candidates_in_graph"] is True
+    graph_relation = client.get("/graph").json["relations"][0]
+    assert graph_relation["relation_type"] == "candidate"
+    assert graph_relation["provenance"]["snippet"] == candidate["evidence_snippet"]
+
+    answer = client.post("/documents/journey-doc/ask", json={"query": "Where does Ada Lovelace work?"})
+    assert answer.status_code == 200
+    assert answer.json["uncertain"] is False
+    assert answer.json["evidence"][0]["document_id"] == "journey-doc"
+    assert answer.json["evidence"][0]["excerpt"] == candidate["evidence_snippet"]
+    scoped_rag = client.post("/rag", json={"query": "Where does Ada Lovelace work?", "document_id": "journey-doc"})
+    assert scoped_rag.status_code == 200
+    assert scoped_rag.json["evidence"][0]["document_id"] == "journey-doc"
+    assert scoped_rag.json["evidence"][0]["excerpt"] == candidate["evidence_snippet"]
+    graph_only_rag = client.post("/rag", json={"query": "Ada Lovelace works at Acme."})
+    assert graph_only_rag.status_code == 200
+    assert graph_only_rag.json["evidence"] == []
+    verification = client.post("/verify", json={"claim": "Ada Lovelace works_at Acme"})
+    assert verification.status_code == 200
+    assert verification.json["label"] == "NOT ENOUGH INFORMATION"
+    assert verification.json["evidence"] == []
+    unsupported = client.post("/documents/journey-doc/ask", json={"query": "Who is Bob?"})
+    assert unsupported.status_code == 200
+    assert unsupported.json["uncertain"] is True
+    assert "couldn't find supporting evidence" in unsupported.json["answer"]
+    unrelated = client.post("/documents/journey-doc/ask", json={"query": "What is Ada's home address?"})
+    assert unrelated.status_code == 200
+    assert unrelated.json["uncertain"] is True
+
+    reviewed = client.post("/documents/journey-doc/review", json={"candidate_index": 0, "decision": "approve"})
+    assert reviewed.status_code == 200
+    assert reviewed.json["inserted"] is True
+    relation = client.get("/graph").json["relations"][0]
+    assert relation["relation_type"] == "human_reviewed"
+    assert relation["provenance"]["document_id"] == "journey-doc"
+    assert relation["provenance"]["snippet"] == candidate["evidence_snippet"]
+    assert len(client.get("/graph").json["relations"]) == 1
+
+    reopened = client.get("/documents/journey-doc")
+    assert reopened.status_code == 200
+    assert reopened.json["document"]["processing_status"] == "ready"
+    assert reopened.json["document"]["text"] == text
+    assert reopened.json["document"]["key_facts"][0]["status"] == "human_reviewed"
+
+
+def test_document_page_evidence_and_failed_analysis_retry(tmp_path):
+    from knowledge_graph_builder.document_analysis import analyze_with_rules, answer_from_document
+
+    text = "Ada works at Acme."
+    pages = [{"page": 3, "start": 0, "end": len(text)}]
+    analysis = analyze_with_rules(text, pages)
+    assert analysis["candidate_relations"][0]["page"] == 3
+    answer = answer_from_document("Where does Ada work?", text, "report.pdf", "page-doc", pages, analysis["candidate_relations"])
+    assert answer["evidence"][0]["page"] == 3
+
+    app = create_app(KnowledgeGraph("failed-analysis"), {
+        "nlp_checkpoint_dir": str(tmp_path / "nlp"),
+        "documents_path": str(tmp_path / "documents.json"),
+        "uploads_path": str(tmp_path / "uploads"),
+        "experiment_dir": str(tmp_path / "experiments"),
+    })
+    client = app.test_client()
+    assert client.post("/documents", json={"document_id": "retry-doc", "text": text}).status_code == 201
+    failed = client.post("/documents/extract", json={
+        "document_id": "retry-doc",
+        "ner_checkpoint": str(tmp_path / "outside" / "ner"),
+        "relation_checkpoint": str(tmp_path / "outside" / "relation"),
+    })
+    assert failed.status_code == 400
+    assert client.get("/documents/retry-doc").json["document"]["processing_status"] == "failed"
+    retried = client.post("/documents/extract", json={"document_id": "retry-doc"})
+    assert retried.status_code == 200
+    assert client.get("/documents/retry-doc").json["document"]["processing_status"] == "ready"
+
+
+def test_docx_upload_and_analysis_uses_the_same_graph_pipeline(tmp_path):
+    docx = BytesIO()
+    with ZipFile(docx, "w") as archive:
+        archive.writestr(
+            "word/document.xml",
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            '<w:body><w:p><w:r><w:t>Ada works at Acme.</w:t></w:r></w:p></w:body></w:document>',
+        )
+    app = create_app(KnowledgeGraph("docx-workflow"), {
+        "documents_path": str(tmp_path / "documents.json"),
+        "graph_path": str(tmp_path / "graph.json"),
+        "uploads_path": str(tmp_path / "uploads"),
+        "experiment_dir": str(tmp_path / "experiments"),
+        "nlp_checkpoint_dir": str(tmp_path / "nlp"),
+    })
+    client = app.test_client()
+    uploaded = client.post(
+        "/documents/upload",
+        data={"document_id": "docx-source", "file": (BytesIO(docx.getvalue()), "source.docx")},
+        content_type="multipart/form-data",
+    )
+    assert uploaded.status_code == 201
+    analyzed = client.post("/documents/extract", json={"document_id": "docx-source"})
+    assert analyzed.status_code == 200
+    assert analyzed.json["candidate_relations"][0]["subject"] == "Ada"
+    assert analyzed.json["candidate_relations"][0]["object"] == "Acme"
+    graph = client.get("/graph").json
+    assert graph["relations"][0]["source"] == "docx-source"
+    assert graph["relations"][0]["relation_type"] == "candidate"
+
+
+def test_document_relationship_extraction_graph_persistence_and_rag(tmp_path):
+    settings = {
+        "documents_path": str(tmp_path / "documents.json"),
+        "graph_path": str(tmp_path / "graph.json"),
+        "uploads_path": str(tmp_path / "uploads"),
+        "experiment_dir": str(tmp_path / "experiments"),
+        "nlp_checkpoint_dir": str(tmp_path / "nlp"),
+    }
+    text = (
+        "Ada Lovelace founded Aurora Innovations. "
+        "Aurora Innovations developed CareFlow. "
+        "Aurora Innovations partnered with Riverbend Hospital. "
+        "Riverbend Hospital is located in Paris. "
+        "Riverbend Hospital studies Medical Imaging. "
+        "Ada Lovelace works at Western Institute. "
+        "Aurora Innovations developed CareFlow."
+    )
+    client = create_app(KnowledgeGraph("document-relationships"), settings).test_client()
+    uploaded = client.post(
+        "/documents/upload",
+        data={"document_id": "relationship-doc", "file": (BytesIO(text.encode()), "research.txt")},
+        content_type="multipart/form-data",
+    )
+    assert uploaded.status_code == 201
+    processed = client.post("/documents/extract", json={"document_id": "relationship-doc"})
+    assert processed.status_code == 200
+    triples = {
+        (row["subject"], row["label"], row["object"])
+        for row in processed.json["candidate_relations"]
+    }
+    assert triples == {
+        ("Ada Lovelace", "founded", "Aurora Innovations"),
+        ("Aurora Innovations", "develops", "CareFlow"),
+        ("Aurora Innovations", "partnered_with", "Riverbend Hospital"),
+        ("Riverbend Hospital", "located_in", "Paris"),
+        ("Riverbend Hospital", "studies", "Medical Imaging"),
+        ("Ada Lovelace", "works_at", "Western Institute"),
+    }
+    assert processed.json["extraction"]["method"] == "lightweight_rule_based"
+    assert all(row["score"] == 0.85 for row in processed.json["candidate_relations"])
+    assert all(row["evidence_snippet"] in text for row in processed.json["candidate_relations"])
+
+    graph_before_reload = client.get("/graph").json
+    assert len(graph_before_reload["relations"]) == len(triples)
+    assert all(row["relation_type"] == "candidate" for row in graph_before_reload["relations"])
+    assert all(row["provenance"]["document_id"] == "relationship-doc" for row in graph_before_reload["relations"])
+    assert all(row["provenance"]["snippet"] in text for row in graph_before_reload["relations"])
+    assert len({row["entity_id"].casefold() for row in graph_before_reload["entities"]}) == len(graph_before_reload["entities"])
+
+    repeated = client.post("/documents/extract", json={"document_id": "relationship-doc"})
+    assert repeated.status_code == 200
+    assert len(client.get("/graph").json["relations"]) == len(triples)
+    assert all(len(row["provenance"].get("evidence", [])) <= 1 for row in client.get("/graph").json["relations"])
+
+    reloaded_client = create_app(None, settings).test_client()
+    assert len(reloaded_client.get("/graph").json["relations"]) == len(triples)
+    questions = {
+        "Who founded Aurora Innovations?": "Ada Lovelace founded Aurora Innovations.",
+        "Which product did Aurora develop?": "Aurora Innovations developed CareFlow.",
+        "Which hospital partnered with Aurora Innovations?": "Aurora Innovations partnered with Riverbend Hospital.",
+        "Where is Riverbend Hospital located?": "Riverbend Hospital is located in Paris.",
+        "What does the research collaboration study?": "Riverbend Hospital studies Medical Imaging.",
+    }
+    for query, source_evidence in questions.items():
+        answer = reloaded_client.post(
+            "/documents/relationship-doc/ask",
+            json={"query": query},
+        )
+        assert answer.status_code == 200
+        assert source_evidence in answer.json["answer"]
+        assert source_evidence in {item["excerpt"] for item in answer.json["evidence"]}
+    unsupported = reloaded_client.post(
+        "/documents/relationship-doc/ask",
+        json={"query": "What is Ada's home address?"},
+    )
+    assert unsupported.status_code == 200
+    assert unsupported.json["uncertain"] is True
+    assert not unsupported.json["evidence"]
+    assert "couldn't find supporting evidence" in unsupported.json["answer"]
 
 
 def test_demo_model_job_extracts_reviews_and_persists_provenance(tmp_path):
@@ -817,11 +1049,7 @@ def test_demo_model_job_extracts_reviews_and_persists_provenance(tmp_path):
         "text": "Alice works at Acme.",
     })
     assert stored.status_code == 201
-    extracted = client.post("/documents/extract", json={
-        "document_id": "doc-demo",
-        "ner_checkpoint": models["nlp_by_task"]["ner"][0],
-        "relation_checkpoint": models["nlp_by_task"]["relation"][0],
-    })
+    extracted = client.post("/documents/extract", json={"document_id": "doc-demo"})
     assert extracted.status_code == 200
     assert extracted.json["inserted_into_graph"] is False
     assert extracted.json["candidate_relations"]

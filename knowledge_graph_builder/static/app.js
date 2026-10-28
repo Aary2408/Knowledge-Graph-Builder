@@ -1,5 +1,5 @@
 const state = {
-  page: "overview",
+  page: "home",
   graph: null,
   documents: [],
   datasets: [],
@@ -7,13 +7,19 @@ const state = {
   experiments: [],
   job: null,
   selectedEntity: null,
+  selectedDocument: null,
+  processing: false,
+  documentAnswer: null,
   chat: [],
 };
 
 const pageNames = {
-  overview: "Overview",
+  home: "Home",
+  overview: "Home",
   graph: "Knowledge graph",
   documents: "Documents",
+  "ask-ai": "Ask AI",
+  "advanced-lab": "Advanced Lab",
   verification: "Claim verification",
   assistant: "GraphRAG assistant",
   evidence: "Evidence explorer",
@@ -22,6 +28,7 @@ const pageNames = {
   experiments: "Experiments",
   settings: "Settings",
 };
+const mainPages = new Set(["home", "documents", "graph", "ask-ai", "advanced-lab"]);
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -61,16 +68,17 @@ function toast(message, error = false) {
 
 function badge(value) {
   const key = String(value || "unknown").toLowerCase();
-  const tone = ["completed", "approved", "human_reviewed", "supported"].includes(key) ? "green"
-    : ["queued", "running", "review_required", "not enough information"].includes(key) ? "amber"
+  const tone = ["completed", "approved", "human_reviewed", "supported", "ready"].includes(key) ? "green"
+    : ["queued", "running", "processing", "analyzing", "uploaded", "stored", "review_required", "not enough information"].includes(key) ? "amber"
       : ["failed", "rejected", "refuted"].includes(key) ? "red"
         : ["predicted", "candidate", "extracted_candidate"].includes(key) ? "violet" : "neutral";
   return `<span class="badge ${tone}">${escapeHTML(String(value || "unknown").replaceAll("_", " "))}</span>`;
 }
 
 function setPage(page) {
-  state.page = pageNames[page] ? page : "overview";
-  $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.page === state.page));
+  state.page = pageNames[page] ? page : "home";
+  const activePage = state.page === "overview" ? "home" : mainPages.has(state.page) ? state.page : "advanced-lab";
+  $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.page === activePage));
   $("#page-title").textContent = pageNames[state.page];
   $("#sidebar").classList.remove("open");
   renderPage();
@@ -118,9 +126,12 @@ async function renderPage() {
   const root = $("#page-content");
   try {
     switch (state.page) {
+      case "home":
       case "overview": root.innerHTML = await renderOverview(); break;
       case "graph": root.innerHTML = renderGraph(); bindGraph(); break;
       case "documents": root.innerHTML = renderDocuments(); break;
+      case "ask-ai": root.innerHTML = renderAssistant(); break;
+      case "advanced-lab": root.innerHTML = renderAdvancedLab(); break;
       case "verification": root.innerHTML = renderVerification(); break;
       case "assistant": root.innerHTML = renderAssistant(); break;
       case "evidence": root.innerHTML = renderEvidence(); break;
@@ -136,26 +147,26 @@ async function renderPage() {
 }
 
 async function renderOverview() {
-  const result = await api("/overview");
-  const experiments = result.recent_experiments || [];
-  const recent = experiments.length ? `<div class="list">${experiments.map((item) => `
-    <div class="list-row"><div class="list-main"><strong>${escapeHTML(item.task || item.job_id || "Experiment")}</strong><small>${escapeHTML(dateLabel(item.created_at))} · ${escapeHTML(item.result?.task || "training run")}</small></div>${badge(item.status)}</div>`).join("")}</div>`
-    : emptyState("◷", "No completed experiments yet", "Run a model from Model Lab to record real training results.");
-  const activity = (result.activity || []).length ? `<div class="list">${result.activity.map((item) => `
-    <div class="list-row"><div class="list-main"><strong>${escapeHTML(item.document_id)}</strong><small>${escapeHTML(dateLabel(item.updated_at))}</small></div>${badge(item.status)}</div>`).join("")}</div>`
-    : emptyState("▤", "No document activity", "Documents you ingest will appear here.");
-  return `${pageHeading("A clear view of your knowledge", "Explore the graph, inspect source evidence, and run experiments from one local research workspace.",
-    `<button class="button" data-navigate="graph">Explore graph</button><button class="button primary" data-navigate="model-lab">Open Model Lab</button>`)}
-    <div class="grid stats">
-      ${metricCard("Graph entities", result.graph.entities, "Current stored entity records", "⌘")}
-      ${metricCard("Relationships", result.graph.relationships, "Observed, reviewed, and other stored edges", "↔")}
-      ${metricCard("Documents", result.documents, "Persisted local source documents", "▤")}
-      ${metricCard("Experiments", state.experiments.length, "Persisted model and job records", "◷")}
-    </div>
-    <div class="grid two">
-      <article class="card"><div class="card-header"><div><h2>Recent experiments</h2><p>Results recorded by actual training jobs.</p></div><button class="button small" data-navigate="experiments">View all</button></div>${recent}</article>
-      <article class="card"><div class="card-header"><div><h2>Recent document activity</h2><p>Ingestion and human-review status.</p></div><button class="button small" data-navigate="documents">Open library</button></div>${activity}</article>
+  const recent = state.documents.slice(0, 4);
+  return `${pageHeading("Understand your documents", "Upload a source and get its summary, key facts, entities, and relationships.",
+    `<button class="button" data-navigate="documents">Browse documents</button>`)}
+    ${documentUploadPanel()}
+    <div class="card section-gap"><div class="card-header"><div><h2>Recent documents</h2><p>Reopen an analysis at any time.</p></div><button class="button small" data-navigate="documents">View all</button></div>
+      ${recent.length ? `<div class="list">${recent.map((doc) => `<div class="list-row"><div class="list-main"><strong>${escapeHTML(doc.filename || doc.document_id)}</strong><small>${escapeHTML(doc.preview || "")}</small></div><button class="button small" data-action="open-document" data-id="${escapeHTML(doc.document_id)}">${doc.processing_status === "ready" ? "Open results" : "Open"}</button></div>`).join("")}</div>` : emptyState("▤", "Your library is ready", "Analyze your first document to see its results here.")}
     </div>`;
+}
+
+function documentUploadPanel() {
+  const processing = state.processing ? `<div class="processing-state" id="processing-state"><span class="spinner"></span>Analyzing your document. This can take a little while.</div>` : "";
+  return `<article class="card upload-card"><div class="card-header"><div><h2>Analyze a document</h2><p>PDF, TXT, Markdown, or DOCX · source text stays in your local workspace.</p></div></div>
+    <form id="document-form" class="form-grid">
+      <div class="field"><label for="document-id">Document name (optional)</label><input id="document-id" name="document_id" placeholder="Auto-generated"></div>
+      <div class="field"><label for="document-file">Choose a document</label><input id="document-file" name="file" type="file" accept=".txt,.md,.pdf,.docx,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"><div class="field-help">Text-based PDFs are supported. Scanned PDFs need OCR first.</div></div>
+      <div class="field full"><div class="drop-zone" id="document-dropzone" tabindex="0" role="button" aria-label="Drop a document or browse files">Drop a document here, or <label class="browse-button" for="document-file">Browse Files</label><div class="selected-file" id="selected-file" aria-live="polite"></div></div></div>
+      <div class="field full"><label for="document-text">Or paste text</label><textarea class="large" id="document-text" name="text" placeholder="Paste text from a source you are authorized to process…"></textarea></div>
+      ${processing}
+      <div class="form-actions field full"><button class="button primary" type="submit" ${state.processing ? "disabled" : ""}>${state.processing ? "Processing…" : "Process Document"}</button><span class="field-help">Extracted relationships remain candidates until reviewed.</span></div>
+    </form></article>`;
 }
 
 function relationRows(relations) {
@@ -166,13 +177,15 @@ function relationRows(relations) {
 
 function renderGraph() {
   const relations = state.graph?.relations || [];
-  return `${pageHeading("Knowledge graph", "Browse stored graph data. Dashed styling is reserved for predicted relationships; only backend facts are shown here.",
+  const entityTypes = [...new Set((state.graph?.entities || []).map((item) => item.attributes?.entity_type || item.attributes?.type).filter(Boolean))];
+  return `${pageHeading("Knowledge graph", "Explore entities and source-backed relationships. Predicted edges are visually distinct from reviewed facts.",
     `<button class="button" data-action="reload">↻ Refresh graph</button>`)}
     <div class="card">
       <div class="card-header"><div><h2>Graph explorer</h2><p>${formatNumber(state.graph?.entities?.length || 0)} entities · ${formatNumber(relations.length)} relationships</p></div>
-        <div class="inline-form"><input class="search-input" id="graph-search" placeholder="Search entities or predicates"><select id="graph-filter" class="search-input" aria-label="Filter relation type"><option value="">All relation types</option>${[...new Set(relations.map((row) => row.relation_type))].map((name) => `<option>${escapeHTML(name)}</option>`).join("")}</select></div>
+        <div class="inline-form"><input class="search-input" id="graph-search" placeholder="Search entities or predicates"><select id="entity-filter" class="search-input" aria-label="Filter entity type"><option value="">All entity types</option>${entityTypes.map((name) => `<option>${escapeHTML(name)}</option>`).join("")}</select><select id="graph-filter" class="search-input" aria-label="Filter relationship type"><option value="">All relationship types</option>${[...new Set(relations.map((row) => row.relation_type))].map((name) => `<option>${escapeHTML(name)}</option>`).join("")}</select></div>
       </div>
-      <div class="graph-layout"><div class="graph-canvas"><div class="graph-toolbar"><button class="button" data-action="graph-reset">Reset view</button><span class="badge neutral">Observed facts</span></div><svg id="graph-svg" viewBox="0 0 800 480" role="img" aria-label="Interactive knowledge graph"></svg></div>
+      <div class="graph-toolbar-legend"><span><i class="legend-dot"></i>Observed or human-reviewed</span><span><i class="legend-dot predicted"></i>Predicted / candidate</span><span>Scroll to zoom · drag to pan · click an edge for evidence</span></div>
+      <div class="graph-layout"><div class="graph-canvas"><div class="graph-toolbar"><button class="button" data-action="graph-reset">Reset view</button></div><svg id="graph-svg" viewBox="0 0 800 480" role="img" aria-label="Interactive knowledge graph"></svg></div>
       <aside class="card" id="entity-details">${emptyState("◉", "Select an entity", "Click a graph node to inspect its relationships and source provenance.")}</aside></div>
       <div class="section-gap"><div class="section-label">Stored relationships</div><div id="graph-table">${relationRows(relations)}</div></div>
     </div>`;
@@ -181,14 +194,21 @@ function renderGraph() {
 function graphFilteredRelations() {
   const query = ($("#graph-search")?.value || "").trim().toLowerCase();
   const type = $("#graph-filter")?.value || "";
+  const entityType = $("#entity-filter")?.value || "";
+  const nodeById = new Map((state.graph?.entities || []).map((item) => [item.entity_id, item]));
   return (state.graph?.relations || []).filter((relation) =>
     (!type || relation.relation_type === type)
+    && (!entityType || [relation.subject, relation.object].some((entity) => {
+      const node = nodeById.get(entity);
+      return (node?.attributes?.entity_type || node?.attributes?.type) === entityType;
+    }))
     && (!query || `${relation.subject} ${relation.predicate} ${relation.object}`.toLowerCase().includes(query)));
 }
 
 function bindGraph() {
   const search = $("#graph-search");
   const filter = $("#graph-filter");
+  const entityFilter = $("#entity-filter");
   if (!search) return;
   const update = () => {
     const relations = graphFilteredRelations();
@@ -197,6 +217,7 @@ function bindGraph() {
   };
   search.addEventListener("input", update);
   filter.addEventListener("change", update);
+  entityFilter.addEventListener("change", update);
   drawGraph(graphFilteredRelations());
   const svg = $("#graph-svg");
   svg.addEventListener("wheel", (event) => {
@@ -242,78 +263,175 @@ function bindGraph() {
 function drawGraph(relations) {
   const svg = $("#graph-svg");
   if (!svg) return;
-  const entities = [...new Set(relations.flatMap((relation) => [relation.subject, relation.object]))];
+  const query = ($("#graph-search")?.value || "").trim().toLowerCase();
+  const entityType = $("#entity-filter")?.value || "";
+  const entityNodes = (state.graph?.entities || []).filter((item) => {
+    const type = item.attributes?.entity_type || item.attributes?.type;
+    return (!query || `${item.label} ${item.entity_id}`.toLowerCase().includes(query))
+      && (!entityType || type === entityType);
+  }).map((item) => item.entity_id);
+  const allEntities = [...new Set([
+    ...relations.flatMap((relation) => [relation.subject, relation.object]),
+    ...entityNodes,
+  ])];
+  const degree = new Map(allEntities.map((entity) => [entity, 0]));
+  relations.forEach((relation) => {
+    degree.set(relation.subject, (degree.get(relation.subject) || 0) + 1);
+    degree.set(relation.object, (degree.get(relation.object) || 0) + 1);
+  });
+  const entities = allEntities.length > 80
+    ? [...allEntities].sort((a, b) => degree.get(b) - degree.get(a) || a.localeCompare(b)).slice(0, 80)
+    : allEntities;
+  const visibleEntitySet = new Set(entities);
+  const displayedRelations = relations.filter((relation) =>
+    visibleEntitySet.has(relation.subject) && visibleEntitySet.has(relation.object));
   const view = state.graphViewport || { x: 0, y: 0, width: 800, height: 480 };
   svg.setAttribute("viewBox", `${view.x} ${view.y} ${view.width} ${view.height}`);
   if (!entities.length) {
-    svg.innerHTML = `<text x="400" y="235" text-anchor="middle" fill="#8991a1" font-size="12">No matching graph relationships</text>`;
+    svg.innerHTML = `<text x="400" y="235" text-anchor="middle" fill="#8991a1" font-size="12">No matching entities or relationships</text>`;
     return;
   }
   const positions = new Map(entities.map((entity, index) => {
     const angle = -Math.PI / 2 + (2 * Math.PI * index / entities.length);
     return [entity, { x: 400 + Math.cos(angle) * Math.min(290, 90 + entities.length * 9), y: 240 + Math.sin(angle) * Math.min(170, 55 + entities.length * 5) }];
   }));
-  const edges = relations.map((relation) => {
+  const edges = displayedRelations.map((relation, index) => {
     const start = positions.get(relation.subject);
     const end = positions.get(relation.object);
     const predicted = ["predicted", "candidate", "model_prediction"].includes(relation.relation_type);
-    return `<g><line class="graph-edge ${predicted ? "predicted" : ""}" x1="${start.x}" y1="${start.y}" x2="${end.x}" y2="${end.y}"/><text class="graph-edge-label" x="${(start.x + end.x) / 2}" y="${(start.y + end.y) / 2 - 4}" text-anchor="middle">${escapeHTML(relation.predicate)}</text></g>`;
+    return `<g class="graph-edge-group" data-relation-index="${index}" tabindex="0" role="button" aria-label="${escapeHTML(`${relation.subject} ${relation.predicate} ${relation.object}`)}"><line class="graph-edge ${predicted ? "predicted" : ""}" x1="${start.x}" y1="${start.y}" x2="${end.x}" y2="${end.y}" marker-end="url(#graph-arrow)"/><text class="graph-edge-label" x="${(start.x + end.x) / 2}" y="${(start.y + end.y) / 2 - 4}" text-anchor="middle">${escapeHTML(relation.predicate.replaceAll("_", " "))}</text></g>`;
   }).join("");
   const nodes = entities.map((entity) => {
     const point = positions.get(entity);
-    const label = entity.length > 18 ? `${entity.slice(0, 16)}…` : entity;
-    return `<g class="graph-node ${state.selectedEntity === entity ? "selected" : ""}" data-entity="${escapeHTML(entity)}" transform="translate(${point.x} ${point.y})"><circle r="18"/><text text-anchor="middle" y="33">${escapeHTML(label)}</text></g>`;
+    const node = (state.graph?.entities || []).find((item) => item.entity_id === entity);
+    const label = node?.label || entity;
+    const display = label.length > 18 ? `${label.slice(0, 16)}…` : label;
+    return `<g class="graph-node ${state.selectedEntity === entity ? "selected" : ""}" data-entity="${escapeHTML(entity)}" transform="translate(${point.x} ${point.y})" tabindex="0" role="button" aria-label="Inspect entity ${escapeHTML(label)}"><circle r="18"/><text text-anchor="middle" y="33">${escapeHTML(display)}</text></g>`;
   }).join("");
-  svg.innerHTML = `<g id="graph-viewport">${edges}${nodes}</g>`;
-  $$(".graph-node", svg).forEach((node) => node.addEventListener("click", () => selectEntity(node.dataset.entity)));
+  const graphNote = allEntities.length > 80
+    ? `<text x="400" y="466" text-anchor="middle" fill="#667085" font-size="11">Showing the 80 most-connected of ${allEntities.length} entities. Search or filter to narrow the graph.</text>`
+    : !displayedRelations.length
+      ? `<text x="400" y="466" text-anchor="middle" fill="#667085" font-size="11">Entities found, but no confidently extracted relationships are available to connect them.</text>`
+      : "";
+  svg.innerHTML = `<defs><marker id="graph-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#8790a3"/></marker></defs><g id="graph-viewport">${edges}${nodes}</g>${graphNote}`;
+  $$(".graph-node", svg).forEach((node) => {
+    node.addEventListener("click", () => selectEntity(node.dataset.entity));
+    node.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectEntity(node.dataset.entity);
+      }
+    });
+  });
+  $$(".graph-edge-group", svg).forEach((edge) => {
+    const select = () => selectRelation(displayedRelations[Number(edge.dataset.relationIndex)]);
+    edge.addEventListener("click", select);
+    edge.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        select();
+      }
+    });
+  });
 }
 
 function selectEntity(entity) {
   state.selectedEntity = entity;
   const relations = (state.graph?.relations || []).filter((item) => item.subject === entity || item.object === entity);
   const node = (state.graph?.entities || []).find((item) => item.entity_id === entity);
-  $("#entity-details").innerHTML = `<div class="card-header"><div><div class="eyebrow">ENTITY</div><h2>${escapeHTML(node?.label || entity)}</h2><p>${escapeHTML(entity)}</p></div></div>
-    <div class="detail-row"><small>Attributes</small><span class="mono">${escapeHTML(JSON.stringify(node?.attributes || {}))}</span></div>
+  $("#entity-details").innerHTML = `<div class="card-header"><div><div class="eyebrow">ENTITY</div><h2>${escapeHTML(node?.label || entity)}</h2></div></div>
     <div class="section-label section-gap">Relationships (${relations.length})</div>
-    ${relations.length ? relations.map((row) => `<div class="detail-row"><small>${escapeHTML(row.subject === entity ? "Outgoing" : "Incoming")} · ${escapeHTML(row.predicate)}</small><span>${escapeHTML(row.subject)} → ${escapeHTML(row.object)}</span><span>${badge(row.relation_type)}</span><span class="muted">${escapeHTML(row.provenance?.document_id || row.source || "No source recorded")}</span>${row.provenance?.snippet ? `<div class="evidence-block section-gap">${escapeHTML(row.provenance.snippet)}</div>` : ""}</div>`).join("") : emptyState("↔", "No relationships", "This entity has no stored edges.")}`;
+    ${relations.length ? relations.map((row) => `<div class="detail-row"><small>${escapeHTML(row.subject === entity ? "Outgoing" : "Incoming")} · ${escapeHTML(row.predicate)}</small><span>${escapeHTML(row.subject)} → ${escapeHTML(row.object)}</span><span>${badge(row.relation_type)}</span><span class="muted">${escapeHTML(row.provenance?.document_id || row.source || "No source recorded")}</span>${row.provenance?.snippet ? `<div class="evidence-block section-gap">${escapeHTML(row.provenance.snippet)}</div>` : ""}${row.provenance?.evidence?.length ? row.provenance.evidence.map((item) => `<div class="evidence-block section-gap">${escapeHTML(item.snippet)}<small>${escapeHTML(item.page ? `Page ${item.page}` : "")}</small></div>`).join("") : ""}<details class="technical-details"><summary>Technical details</summary><span class="mono">${escapeHTML(JSON.stringify({ entity_id: entity, attributes: node?.attributes || {}, provenance: row.provenance || {} }))}</span></details></div>`).join("") : emptyState("↔", "No relationships", "This entity has no stored edges.")}`;
   drawGraph(graphFilteredRelations());
+}
+
+function selectRelation(relation) {
+  if (!relation) return;
+  const details = $("#entity-details");
+  if (!details) return;
+  details.innerHTML = `<div class="card-header"><div><div class="eyebrow">RELATIONSHIP EVIDENCE</div><h2>${escapeHTML(relation.subject)} ${escapeHTML(relation.predicate)} ${escapeHTML(relation.object)}</h2><p>${badge(relation.relation_type)}</p></div></div>
+    ${relation.provenance?.snippet ? `<div class="evidence-block">${escapeHTML(relation.provenance.snippet)}</div>` : `<p class="muted">No source excerpt was recorded for this edge.</p>`}
+    <div class="detail-row"><small>Source</small><span>${escapeHTML(relation.provenance?.document_id || relation.source || "Not recorded")}</span></div>
+    ${relation.provenance?.evidence?.length ? `<div class="detail-row"><small>Additional source excerpts</small>${relation.provenance.evidence.map((item) => `<div class="evidence-block section-gap">${escapeHTML(item.snippet)}<small>${escapeHTML(item.page ? `Page ${item.page}` : "")}</small></div>`).join("")}</div>` : ""}
+    <details class="technical-details"><summary>Technical details</summary><span class="mono">${escapeHTML(JSON.stringify({ confidence: relation.confidence, source: relation.source, provenance: relation.provenance || {} }))}</span></details>`;
 }
 
 function renderDocuments() {
   const docs = state.documents;
-  const nerCheckpoints = state.models.nlp_by_task?.ner || (state.models.nlp || []).filter((path) => path.includes("/ner-"));
-  const relationCheckpoints = state.models.nlp_by_task?.relation || (state.models.nlp || []).filter((path) => path.includes("/relation-"));
-  const setupNotice = !nerCheckpoints.length || !relationCheckpoints.length
-    ? `<div class="notice warning section-gap">Extraction needs both compatible saved checkpoints. Missing: ${!nerCheckpoints.length ? "NER" : ""}${!nerCheckpoints.length && !relationCheckpoints.length ? " and " : ""}${!relationCheckpoints.length ? "relation classifier" : ""}. <button class="button small section-gap" data-action="setup-demo-models">Train lightweight demo checkpoints</button> <button class="button small section-gap" data-navigate="model-lab">Open Model Lab</button><div class="field-help section-gap">Demo setup performs real training on the bundled synthetic sample dataset and marks the checkpoints as smoke-test models. It is for trying the workflow, not reliable extraction from research documents.</div></div>`
-    : "";
-  const syntheticWarning = nerCheckpoints.some(isSyntheticCheckpoint) || relationCheckpoints.some(isSyntheticCheckpoint)
-    ? `<div class="notice warning section-gap">One or more available NLP checkpoints were trained on synthetic smoke data. Predictions are only for workflow demonstration and must not be treated as reliable extraction. Inspect every source snippet before approval.</div>`
-    : "";
   const list = docs.length ? `<div class="list">${docs.map((doc) => `
-    <div class="list-row"><div class="list-main"><strong>${escapeHTML(doc.filename || doc.document_id)}</strong><small>${escapeHTML(doc.document_id)} · ${escapeHTML(dateLabel(doc.updated_at))} · ${escapeHTML(doc.preview || "")}</small>
-      ${doc.extraction ? `<small>Extraction: ${formatNumber(doc.extraction.entity_count)} entities, ${formatNumber(doc.extraction.candidate_count)} candidates${doc.extraction.synthetic_models ? " · synthetic smoke models" : ""}.</small>${doc.extraction.entity_count === 0 ? `<small class="muted">No entities were detected. The lightweight local demo NER conservatively ignores tokens absent from its training set; train/select a transformer checkpoint for general vocabulary.</small>` : doc.extraction.candidate_count === 0 ? `<small class="muted">No relation candidates were returned. A missing prediction is not evidence that the document contains no facts.</small>` : ""}` : ""}
-      ${(doc.candidate_relations || []).map((candidate, index) => `<div class="evidence-block section-gap"><strong>${escapeHTML(candidate.subject)} — ${escapeHTML(candidate.label)} → ${escapeHTML(candidate.object)}</strong><div>${escapeHTML(candidate.evidence_snippet)}</div><div class="form-actions">${badge(candidate.status)}${candidate.synthetic_model ? badge("synthetic smoke") : ""}${candidate.status === "extracted_candidate" ? `<button class="button small" data-action="review-candidate" data-id="${escapeHTML(doc.document_id)}" data-index="${index}" data-decision="approve">Approve</button><button class="button small danger" data-action="review-candidate" data-id="${escapeHTML(doc.document_id)}" data-index="${index}" data-decision="reject">Reject</button>` : ""}</div></div>`).join("")}
-    </div><div>${badge(doc.status)}${["stored", "extracted"].includes(doc.status) && !(doc.candidate_relations || []).length ? `<button class="button small section-gap" data-action="extract-document" data-id="${escapeHTML(doc.document_id)}">${doc.status === "stored" ? "Extract" : "Retry extraction"}</button>` : ""}</div></div>`).join("")}</div>`
-    : emptyState("▤", "Your document library is empty", "Upload a text, Markdown, PDF, or DOCX source document to begin.");
-  return `${pageHeading("Documents", "Upload a source file, extract entity/relation candidates with saved local checkpoints, then review facts before adding them to the graph.",
-    `<button class="button" data-action="reload">↻ Refresh</button>`)}
-    ${setupNotice}
-    ${syntheticWarning}
-    <div class="split-panel"><article class="card"><div class="card-header"><div><h2>Add a source document</h2><p>Text is stored locally with its source ID. Extraction remains an explicit step.</p></div></div>
-      <form id="document-form" class="form-grid">
-        <div class="field"><label for="document-id">Document ID (optional)</label><input id="document-id" name="document_id" placeholder="auto-generated if empty"></div>
-        <div class="field full"><label for="document-file">Upload a file</label><input id="document-file" name="file" type="file" accept=".txt,.md,.pdf,.docx,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"><div class="field-help">Supported: UTF-8 TXT/Markdown, text-based PDF, DOCX. Max file size is configured by the server (16 MB by default); scanned PDFs need OCR first.</div></div>
-        <div class="field full"><label for="document-text">Or paste document text</label><textarea class="large" id="document-text" name="text" placeholder="Paste text from a source you are authorized to process…"></textarea></div>
-        <div class="field"><label for="ner-checkpoint">NER checkpoint</label><select id="ner-checkpoint"><option value="">Select a saved NER checkpoint</option>${nerCheckpoints.map((path) => `<option value="${escapeHTML(path)}">${escapeHTML(checkpointLabel(path))}</option>`).join("")}</select></div>
-        <div class="field"><label for="relation-checkpoint">Relation checkpoint</label><select id="relation-checkpoint"><option value="">Select a saved relation checkpoint</option>${relationCheckpoints.map((path) => `<option value="${escapeHTML(path)}">${escapeHTML(checkpointLabel(path))}</option>`).join("")}</select></div>
-        <div class="field-help full">Extraction is best-effort, not exhaustive; predicted relations remain candidates until human review.</div>
-        <div class="form-actions field full"><button class="button" type="submit">Store pasted text</button><button class="button" type="button" data-action="upload-document">Upload file</button><button class="button primary" type="button" data-action="upload-and-extract">Upload + extract</button></div>
-      </form></article>
-      <article class="card"><div class="card-header"><div><h2>Ingestion notes</h2><p>Provenance is retained across extraction and review.</p></div></div>
-        <div class="notice">The NER/relation checkpoints produce best-effort candidates, not a guarantee of every fact. Review source snippets before approving facts into the graph. Approved relationships create graph entities and edges with source provenance.</div>
-        <div class="list section-gap"><div class="list-row"><div class="list-main"><strong>Stored</strong><small>Document text and identifier persisted locally.</small></div>${badge("stored")}</div><div class="list-row"><div class="list-main"><strong>Review required</strong><small>Extracted entity pairs await a human decision.</small></div>${badge("review_required")}</div><div class="list-row"><div class="list-main"><strong>Human reviewed</strong><small>Approved facts enter the graph with source provenance.</small></div>${badge("human_reviewed")}</div></div>
-      </article></div>
-      <article class="card section-gap"><div class="card-header"><div><h2>Document library</h2><p>${docs.length} locally stored documents</p></div></div>${list}</article>`;
+    <div class="list-row"><div class="list-main"><strong>${escapeHTML(doc.filename || doc.document_id)}</strong><small>${escapeHTML(doc.preview || doc.document_id)}</small><small>${escapeHTML(dateLabel(doc.updated_at))} · ${escapeHTML(doc.processing_status || doc.status || "uploaded")}</small></div>
+      <div class="document-actions">${badge(doc.processing_status || doc.status)}<button class="button small" data-action="open-document" data-id="${escapeHTML(doc.document_id)}">Open</button></div></div>`).join("")}</div>`
+    : emptyState("▤", "Your document library is empty", "Upload a PDF, TXT, Markdown, or DOCX document to begin.");
+  const selected = state.selectedDocument ? documentResults(state.selectedDocument) : "";
+  return `${pageHeading("Documents", "Your sources and their analysis results.", `<button class="button" data-action="reload">Refresh</button>`)}
+    ${documentUploadPanel()}
+    <article class="card section-gap"><div class="card-header"><div><h2>Document library</h2><p>${docs.length} saved source${docs.length === 1 ? "" : "s"}</p></div></div>${list}</article>
+    ${selected}`;
+}
+
+function documentResults(doc) {
+  const facts = doc.key_facts || [];
+  const entities = doc.entities || [];
+  const candidates = doc.candidate_relations || [];
+  const relationships = candidates.length ? `<div class="list">${candidates.map((item, index) => `
+    <div class="list-row"><div class="list-main"><strong>${escapeHTML(item.subject)} <span class="muted">${escapeHTML(item.label)}</span> ${escapeHTML(item.object)}</strong>
+      <small>${escapeHTML(item.evidence_snippet || "")}</small><small>${escapeHTML(item.page ? `Page ${item.page} · ` : "")}${escapeHTML(item.extraction_method === "lightweight_rule_based" ? "Rule match; not a trained model." : item.synthetic_model ? "Synthetic-checkpoint prediction; review carefully." : "Model-extracted candidate.")}</small></div>
+      <div class="document-actions">${badge(item.status)}${item.status === "extracted_candidate" ? `<button class="button small" data-action="review-candidate" data-id="${escapeHTML(doc.document_id)}" data-index="${index}" data-decision="approve">Approve</button><button class="button small danger" data-action="review-candidate" data-id="${escapeHTML(doc.document_id)}" data-index="${index}" data-decision="reject">Reject</button>` : ""}</div></div>`).join("")}</div>`
+    : emptyState("↔", "No confident relationships found", "Entities may still appear in the Knowledge Graph. No supported relationship patterns or model candidates were found in this source.");
+  const factsHtml = facts.length ? `<div class="list">${facts.map((item) => `
+    <div class="evidence-block fact-block"><strong>${escapeHTML(item.subject)} — ${escapeHTML(item.predicate)} → ${escapeHTML(item.object)}</strong><p>${escapeHTML(item.text)}</p><small>${escapeHTML(item.page ? `Page ${item.page} · ` : "")}${badge(item.status || "extracted_candidate")}</small></div>`).join("")}</div>`
+    : emptyState("⌕", "No key facts extracted", "This extraction did not identify a supported relationship.");
+  return `<section class="card results-card" id="document-results"><div class="results-title"><div><div class="eyebrow">ANALYSIS RESULTS</div><h2>${escapeHTML(doc.filename || doc.document_id)}</h2><p>${escapeHTML(doc.document_id)} · ${badge(doc.processing_status || doc.status)}</p></div><div class="heading-actions"><button class="button" data-navigate="graph">Explore Knowledge Graph</button><button class="button" data-action="ask-document" data-id="${escapeHTML(doc.document_id)}">Ask Questions</button><button class="button" data-navigate="documents">Inspect evidence</button></div></div>
+    <div class="analysis-summary"><div><small>Entities extracted</small><strong>${formatNumber(entities.length)}</strong></div><div><small>Relationship candidates</small><strong>${formatNumber(candidates.length)}</strong></div><div><small>Processing status</small><strong>${escapeHTML(doc.processing_status === "ready" ? "Ready" : doc.processing_status || "Uploaded")}</strong></div></div>
+    ${doc.processing_status === "failed" ? `<div class="notice warning">Analysis failed: ${escapeHTML(doc.processing_error || "Unknown error.")}<button class="button small" data-action="retry-analysis" data-id="${escapeHTML(doc.document_id)}">Retry analysis</button></div>` : ""}
+    ${doc.processing_status === "uploaded" ? `<div class="notice">This document is uploaded but not analyzed yet.<button class="button small" data-action="retry-analysis" data-id="${escapeHTML(doc.document_id)}">Analyze document</button></div>` : ""}
+    <section class="result-section"><h3>A. Summary</h3>${doc.summary ? `<p class="document-summary">${escapeHTML(doc.summary)}</p><small class="field-help">Extractive summary from the source text; no generative summary model was used.</small>` : `<p class="muted">A summary is unavailable for this document.</p>`}</section>
+    <section class="result-section"><h3>B. Key facts</h3>${factsHtml}</section>
+    <section class="result-section"><h3>C. Entities</h3>${entities.length ? `<div class="entity-chips">${entities.map((item) => `<span class="entity-chip">${escapeHTML(item.text)} <small>${escapeHTML(item.label)}</small></span>`).join("")}</div>` : emptyState("◉", "No entities detected", "No supported names were detected in this source.")}</section>
+    <section class="result-section"><h3>D. Relationships</h3><p class="field-help">Extracted candidates appear in the graph but are not approved facts. Approving a candidate keeps its source provenance.</p>${relationships}</section>
+    <section class="result-section"><h3>E. Ask AI</h3><form id="document-ask-form" data-id="${escapeHTML(doc.document_id)}" class="inline-form"><input class="search-input" name="query" aria-label="Ask a question about this document" required placeholder="Ask a question about this document"><button class="button primary" type="submit">Ask</button></form>${renderDocumentAnswer(state.documentAnswer)}</section>
+  </section>`;
+}
+
+function renderDocumentAnswer(result) {
+  if (!result) return "";
+  return `<div class="answer-box"><strong>${result.uncertain ? "Not enough evidence" : "Answer from this document"}</strong><p>${escapeHTML(result.answer)}</p>
+    ${result.evidence?.map((item) => `<div class="evidence-block"><p>${escapeHTML(item.excerpt)}</p><small>${escapeHTML(item.source)}${item.page ? ` · Page ${item.page}` : ""}</small></div>`).join("") || ""}
+    ${result.relationships?.length ? `<div class="section-gap"><strong>Related extracted relationships</strong>${result.relationships.map((item) => `<div class="detail-row">${escapeHTML(item.subject)} — ${escapeHTML(item.predicate)} → ${escapeHTML(item.object)} ${badge(item.status)}<div class="muted">${escapeHTML(item.evidence)}</div></div>`).join("")}</div>` : ""}
+  </div>`;
+}
+
+function showSelectedFile(file) {
+  const display = $("#selected-file");
+  if (!file || !display) return;
+  const supported = /\.(txt|md|pdf|docx)$/i.test(file.name);
+  if (!supported) {
+    $("#document-file").value = "";
+    display.textContent = "";
+    toast("Choose a TXT, Markdown, PDF, or DOCX file.", true);
+    return;
+  }
+  if (file.size > 16 * 1024 * 1024) {
+    $("#document-file").value = "";
+    display.textContent = "";
+    toast("This file is larger than the default 16 MB upload limit.", true);
+    return;
+  }
+  display.textContent = `${file.name} · ${(file.size / (1024 * 1024)).toFixed(2)} MB · Ready to analyze`;
+}
+
+function renderAdvancedLab() {
+  const items = [
+    ["model-lab", "Model training & inference", "NER, relation classification, GNN and NLI training."],
+    ["datasets", "Datasets", "Prepare, validate, and inspect training data."],
+    ["experiments", "Experiments", "Review tracked runs, metrics, and checkpoints."],
+    ["assistant", "GraphRAG retrieval", "Query approved graph evidence and inspect provenance."],
+    ["verification", "Claim verification", "Run optional evidence-backed claim verification."],
+    ["evidence", "Evidence explorer", "Inspect graph evidence and provenance."],
+    ["settings", "Settings & system", "Inspect local API and workspace details."],
+  ];
+  return `${pageHeading("Advanced Lab", "Technical model development and evaluation tools. Document analysis does not require these settings.")}
+    <div class="advanced-links">${items.map(([page, title, description]) => `<button class="advanced-link" data-page="${page}"><strong>${escapeHTML(title)}</strong><span>${escapeHTML(description)}</span><span class="advanced-arrow">Open →</span></button>`).join("")}</div>`;
 }
 
 function renderVerification() {
@@ -333,9 +451,15 @@ function renderVerification() {
 function renderAssistant() {
   const thread = state.chat.length ? state.chat.map((message) => `<div class="chat-message ${message.role}">${escapeHTML(message.text)}${message.evidence?.length ? `<div class="chat-sources">${message.evidence.map((item) => `<span class="source-chip">${escapeHTML(item.source || "Source not recorded")}</span>`).join("")}</div>${message.evidence.map((item) => `<div class="evidence-block section-gap">${escapeHTML(item.fact)}<br><span class="muted">${escapeHTML((item.graph_path || []).join(" → "))}</span></div>`).join("")}` : ""}</div>`).join("")
     : `<div class="chat-message assistant">Ask a question about facts stored in the graph. Answers summarize retrieved records and cite their stored source identifiers where available.</div>`;
-  return `${pageHeading("GraphRAG assistant", "A retrieval interface over graph facts and provenance. It does not generate independent citations or claim proof.",
-    `<span class="badge violet">Local graph retrieval</span>`)}
-    <article class="card"><div class="chat-thread" id="chat-thread">${thread}</div><form id="rag-form" class="inline-form"><input class="search-input" id="rag-query" placeholder="Ask a question about the current graph…" required><button class="button primary" type="submit">Retrieve evidence</button></form><div class="field-help section-gap">Predicted edges are not used as supporting evidence by default.</div></article>`;
+  const readyDocuments = state.documents.filter((doc) => doc.processing_status === "ready");
+  const selectedId = state.selectedDocument?.document_id || "";
+  const title = state.page === "ask-ai" ? "Ask AI" : "GraphRAG assistant";
+  return `${pageHeading(title, "Ask about a document or search across approved graph evidence. Answers include retrieved source excerpts.",
+    `<button class="button" data-navigate="documents">Browse documents</button>`)}
+    <article class="card"><div class="chat-thread" id="chat-thread">${thread}</div><form id="rag-form" class="rag-form">
+      <div class="field"><label for="rag-document">Search scope</label><select id="rag-document"><option value="">All approved graph evidence</option>${readyDocuments.map((doc) => `<option value="${escapeHTML(doc.document_id)}" ${selectedId === doc.document_id ? "selected" : ""}>${escapeHTML(doc.filename || doc.document_id)}</option>`).join("")}</select></div>
+      <div class="inline-form section-gap"><input class="search-input" id="rag-query" placeholder="Ask a question…" required><button class="button primary" type="submit">Ask</button></div>
+    </form><div class="field-help section-gap">Predicted and unreviewed candidate edges are never treated as approved graph evidence. Document scope retrieves source excerpts from that document.</div></article>`;
 }
 
 function renderEvidence() {
@@ -506,26 +630,6 @@ function renderVerificationResult(result) {
     ${evidence.length ? evidence.map((item) => `<div class="evidence-block section-gap">${escapeHTML(item.snippet || item.fact || "Evidence passage")}<div class="field-help">Source: ${escapeHTML(item.source || item.provenance?.document_id || "Not recorded")}</div></div>`).join("") : `<div class="notice warning section-gap">No supporting passage was returned. Absence of evidence is not proof of falsity.</div>`}`;
 }
 
-async function submitDocument(form, alsoExtract = false) {
-  const file = $("#document-file").files[0];
-  if (file) {
-    const created = await uploadDocument(file);
-    if (alsoExtract) await extractDocument(created.document.document_id);
-    else toast("Document uploaded and stored locally.");
-    await refreshState();
-    return;
-  }
-  const text = $("#document-text").value;
-  if (!text.trim()) throw new Error("Choose a document file or enter text to store.");
-  const documentId = $("#document-id").value.trim();
-  const payload = { text, ...(documentId ? { document_id: documentId } : {}) };
-  const result = await api("/documents", { method: "POST", body: JSON.stringify(payload) });
-  const id = result.document.document_id;
-  if (alsoExtract) await extractDocument(id, text);
-  else toast("Document stored locally.");
-  await refreshState();
-}
-
 async function uploadDocument(file = $("#document-file").files[0]) {
   if (!file) throw new Error("Choose a document file to upload.");
   const formData = new FormData();
@@ -535,21 +639,68 @@ async function uploadDocument(file = $("#document-file").files[0]) {
   return api("/documents/upload", { method: "POST", body: formData });
 }
 
-async function extractDocument(documentId, selectedCheckpoints = {}) {
-  const ner = selectedCheckpoints.ner ?? $("#ner-checkpoint").value;
-  const relation = selectedCheckpoints.relation ?? $("#relation-checkpoint").value;
-  await api("/documents/extract", {
+async function extractDocument(documentId) {
+  return api("/documents/extract", {
     method: "POST",
-    body: JSON.stringify({ document_id: documentId, ner_checkpoint: ner, relation_checkpoint: relation }),
+    body: JSON.stringify({ document_id: documentId }),
   });
-  toast("Extraction complete. Candidate relationships await review.");
-  await refreshState();
+}
+
+async function analyzeDocument(form) {
+  if (state.processing) return;
+  const file = $("#document-file", form).files[0];
+  const text = $("#document-text", form).value;
+  if (!file && !text.trim()) throw new Error("Choose a document or paste text to analyze.");
+  state.processing = true;
+  const button = $('button[type="submit"]', form);
+  const originalLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = "Analyzing…";
+  const status = document.createElement("div");
+  status.className = "processing-state";
+  status.innerHTML = '<span class="spinner"></span>Uploading and analyzing. Please keep this page open.';
+  form.append(status);
+  let documentId = "";
+  try {
+    if (file) {
+      const uploaded = await uploadDocument(file);
+      documentId = uploaded.document.document_id;
+    } else {
+      const requestedId = $("#document-id", form).value.trim();
+      const stored = await api("/documents", {
+        method: "POST",
+        body: JSON.stringify({ text, ...(requestedId ? { document_id: requestedId } : {}) }),
+      });
+      documentId = stored.document.document_id;
+    }
+    await extractDocument(documentId);
+    state.processing = false;
+    state.selectedDocument = (await api(`/documents/${encodeURIComponent(documentId)}`)).document;
+    state.documentAnswer = null;
+    await refreshState();
+    setPage("documents");
+    requestAnimationFrame(() => $("#document-results")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    toast("Document analysis is ready.");
+  } catch (error) {
+    if (documentId) {
+      try { state.selectedDocument = (await api(`/documents/${encodeURIComponent(documentId)}`)).document; } catch { /* retain the API error */ }
+      state.processing = false;
+      await refreshState();
+      setPage("documents");
+    }
+    throw error;
+  } finally {
+    state.processing = false;
+    button.disabled = false;
+    button.textContent = originalLabel;
+    status.remove();
+  }
 }
 
 function drawChat() {
   const thread = $("#chat-thread");
   if (!thread) return;
-  thread.innerHTML = state.chat.map((message) => `<div class="chat-message ${message.role}">${escapeHTML(message.text)}${message.evidence?.length ? `<div class="chat-sources">${message.evidence.map((item) => `<span class="source-chip">${escapeHTML(item.source || "Source not recorded")}</span>`).join("")}</div>${message.evidence.map((item) => `<div class="evidence-block section-gap">${escapeHTML(item.fact)}<br><span class="muted">${escapeHTML((item.graph_path || []).join(" → "))}</span></div>`).join("")}` : ""}</div>`).join("");
+  thread.innerHTML = state.chat.map((message) => `<div class="chat-message ${message.role}">${escapeHTML(message.text)}${message.evidence?.length ? `<div class="chat-sources">${message.evidence.map((item) => `<span class="source-chip">${escapeHTML(item.source || item.document_id || "Source not recorded")}${item.page ? ` · Page ${escapeHTML(item.page)}` : ""}</span>`).join("")}</div>${message.evidence.map((item) => `<div class="evidence-block section-gap">${escapeHTML(item.excerpt || item.fact)}<br><span class="muted">${escapeHTML((item.graph_path || []).join(" → "))}</span></div>`).join("")}` : ""}</div>`).join("");
   thread.scrollTop = thread.scrollHeight;
 }
 
@@ -615,34 +766,25 @@ document.addEventListener("click", async (event) => {
     switch (action.dataset.action) {
       case "reload": await refreshState(); toast("Workspace data refreshed."); break;
       case "graph-reset": state.selectedEntity = null; state.graphViewport = null; drawGraph(graphFilteredRelations()); $("#entity-details").innerHTML = emptyState("◉", "Select an entity", "Click a graph node to inspect its relationships and source provenance."); break;
-      case "upload-document": {
-        const form = $("#document-form");
-        const created = await uploadDocument();
-        form.reset();
+      case "open-document": {
+        state.selectedDocument = (await api(`/documents/${encodeURIComponent(action.dataset.id)}`)).document;
+        state.documentAnswer = null;
+        setPage("documents");
+        requestAnimationFrame(() => $("#document-results")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+        break;
+      }
+      case "ask-document": {
+        state.selectedDocument = (await api(`/documents/${encodeURIComponent(action.dataset.id)}`)).document;
+        state.documentAnswer = null;
+        setPage("ask-ai");
+        break;
+      }
+      case "retry-analysis": {
+        await extractDocument(action.dataset.id);
+        state.selectedDocument = (await api(`/documents/${encodeURIComponent(action.dataset.id)}`)).document;
+        state.documentAnswer = null;
         await refreshState();
-        toast(`Uploaded ${created.document.filename}.`);
-        break;
-      }
-      case "upload-and-extract": {
-        const form = $("#document-form");
-        const selectedCheckpoints = {
-          ner: $("#ner-checkpoint").value,
-          relation: $("#relation-checkpoint").value,
-        };
-        const created = await uploadDocument();
-        try {
-          await extractDocument(created.document.document_id, selectedCheckpoints);
-          form.reset();
-        } catch (error) {
-          await refreshState();
-          throw error;
-        }
-        break;
-      }
-      case "extract-document": {
-        const doc = state.documents.find((item) => item.document_id === action.dataset.id);
-        if (!doc) throw new Error("Document is no longer available. Refresh and retry.");
-        await extractDocument(doc.document_id);
+        toast("Document analysis is ready.");
         break;
       }
       case "review-candidate": {
@@ -650,6 +792,9 @@ document.addEventListener("click", async (event) => {
           method: "POST",
           body: JSON.stringify({ candidate_index: Number(action.dataset.index), decision: action.dataset.decision }),
         });
+        if (state.selectedDocument?.document_id === action.dataset.id) {
+          state.selectedDocument = (await api(`/documents/${encodeURIComponent(action.dataset.id)}`)).document;
+        }
         toast(action.dataset.decision === "approve" ? "Fact approved with source provenance." : "Candidate rejected.");
         await refreshState();
         break;
@@ -708,20 +853,70 @@ document.addEventListener("click", async (event) => {
   } catch (error) { toast(error.message, true); }
 });
 
+document.addEventListener("change", (event) => {
+  if (event.target.id === "document-file" && event.target.files?.[0]) showSelectedFile(event.target.files[0]);
+});
+
+document.addEventListener("dragover", (event) => {
+  const dropzone = event.target.closest("#document-dropzone");
+  if (dropzone) {
+    event.preventDefault();
+    dropzone.classList.add("drag-over");
+  }
+});
+
+document.addEventListener("dragleave", (event) => {
+  const dropzone = event.target.closest("#document-dropzone");
+  if (dropzone && !dropzone.contains(event.relatedTarget)) dropzone.classList.remove("drag-over");
+});
+
+document.addEventListener("drop", (event) => {
+  const dropzone = event.target.closest("#document-dropzone");
+  if (!dropzone) return;
+  event.preventDefault();
+  dropzone.classList.remove("drag-over");
+  const file = event.dataTransfer?.files?.[0];
+  if (!file) return;
+  const input = $("#document-file");
+  const transfer = new DataTransfer();
+  transfer.items.add(file);
+  input.files = transfer.files;
+  showSelectedFile(file);
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.target.id === "document-dropzone" && (event.key === "Enter" || event.key === " ")) {
+    event.preventDefault();
+    $("#document-file").click();
+  }
+});
+
 document.addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
     if (event.target.id === "document-form") {
-      await submitDocument(event.target);
-      event.target.reset();
+      await analyzeDocument(event.target);
+    } else if (event.target.id === "document-ask-form") {
+      const documentId = event.target.dataset.id;
+      const query = new FormData(event.target).get("query").toString().trim();
+      state.documentAnswer = await api(`/documents/${encodeURIComponent(documentId)}/ask`, {
+        method: "POST",
+        body: JSON.stringify({ query }),
+      });
+      if (state.selectedDocument?.document_id === documentId) renderPage();
     } else if (event.target.id === "verify-form") {
       const result = await api("/verify", { method: "POST", body: JSON.stringify({ claim: $("#claim-input").value }) });
       $("#verification-result").innerHTML = renderVerificationResult(result);
     } else if (event.target.id === "rag-form") {
       const query = $("#rag-query").value.trim();
       state.chat.push({ role: "user", text: query });
-      const response = await api("/rag", { method: "POST", body: JSON.stringify({ query }) });
+      const documentId = $("#rag-document")?.value || "";
+      const response = await api("/rag", { method: "POST", body: JSON.stringify({ query, ...(documentId ? { document_id: documentId } : {}) }) });
       state.chat.push({ role: "assistant", text: response.answer, evidence: response.evidence || [] });
+      if (documentId) {
+        state.documentAnswer = response;
+        state.selectedDocument = (await api(`/documents/${encodeURIComponent(documentId)}`)).document;
+      }
       $("#rag-query").value = "";
       renderPage();
     } else if (event.target.id === "training-form") {

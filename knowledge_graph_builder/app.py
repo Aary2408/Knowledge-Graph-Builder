@@ -14,7 +14,8 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     Flask = None
 
-from .document_ingest import extract_document_text
+from .document_analysis import analyze_with_rules, source_sentence_at
+from .document_ingest import extract_document_with_provenance
 from .experiments import ExperimentTracker
 from .gnn import GraphNeuralNetworkTrainer
 from .graph import KnowledgeGraph
@@ -79,6 +80,9 @@ def create_app(graph: Optional[KnowledgeGraph] = None, model_config: Optional[Di
         documents: Dict[str, Dict[str, Any]] = {
             item["document_id"]: item for item in stored_documents
         }
+        for item in documents.values():
+            item.setdefault("processing_status", "ready" if item.get("extraction") else "uploaded")
+            item.setdefault("source_pages", [])
     else:
         documents = {}
     executor = ThreadPoolExecutor(max_workers=int(settings.get("training_workers", 2)))
@@ -158,6 +162,136 @@ def create_app(graph: Optional[KnowledgeGraph] = None, model_config: Optional[Di
         if graph_path:
             state_graph.save_json(graph_path)
 
+    def store_extraction_in_graph(
+        document_id: str,
+        entities: list[Dict[str, Any]],
+        candidates: list[Dict[str, Any]],
+        method: str,
+    ) -> int:
+        def entity_key(value: str) -> str:
+            return " ".join(value.casefold().split())
+
+        def predicate_key(value: str) -> str:
+            normalized = "_".join(value.casefold().replace("-", " ").split())
+            return {
+                "works_for": "works_at",
+                "developed": "develops",
+                "develop": "develops",
+                "partners_with": "partnered_with",
+                "collaborates_with": "partnered_with",
+                "collaborated_with": "partnered_with",
+                "located": "located_in",
+            }.get(normalized, normalized)
+
+        canonical_entities = {entity_key(entity_id): entity_id for entity_id in state_graph.entities}
+
+        for entity in entities:
+            original_id = entity["text"]
+            entity_id = canonical_entities.setdefault(entity_key(original_id), original_id)
+            existing = state_graph.find_entity(entity_id)
+            source_ids = list((existing.attributes if existing else {}).get("document_ids", []))
+            if document_id not in source_ids:
+                source_ids.append(document_id)
+            mentions = list((existing.attributes if existing else {}).get("mentions", []))
+            mention = {
+                "document_id": document_id,
+                "start": entity.get("start"),
+                "end": entity.get("end"),
+                "page": entity.get("page"),
+            }
+            if mention not in mentions:
+                mentions.append(mention)
+            state_graph.add_entity(entity_id, entity_id, {
+                "entity_type": entity.get("label", "ENTITY"),
+                "document_ids": source_ids,
+                "mentions": mentions,
+            })
+
+        for candidate in candidates:
+            subject = canonical_entities.setdefault(entity_key(candidate["subject"]), candidate["subject"])
+            obj = canonical_entities.setdefault(entity_key(candidate["object"]), candidate["object"])
+            if state_graph.find_entity(subject) is None:
+                state_graph.add_entity(subject, subject, {"entity_type": candidate.get("subject_label", "ENTITY")})
+            if state_graph.find_entity(obj) is None:
+                state_graph.add_entity(obj, obj, {"entity_type": candidate.get("object_label", "ENTITY")})
+            predicate = predicate_key(candidate["label"])
+            provenance = {
+                "document_id": document_id,
+                "snippet": candidate["evidence_snippet"],
+                "source_offsets": candidate.get("source_offsets", {}),
+                "page": candidate.get("page"),
+                "extraction_method": candidate.get("extraction_method", method),
+            }
+            existing_relation = next(
+                (
+                    relation for relation in state_graph.query(subject, predicate, obj)
+                    if relation.source == document_id
+                    and relation.relation_type in {"candidate", "extracted_candidate"}
+                ),
+                None,
+            )
+            if existing_relation is None:
+                existing_relation = next(
+                    (
+                        relation for relation in state_graph.relations
+                        if entity_key(relation.subject) == entity_key(subject)
+                        and predicate_key(relation.predicate) == predicate
+                        and entity_key(relation.obj) == entity_key(obj)
+                        and relation.source == document_id
+                        and relation.relation_type in {"candidate", "extracted_candidate"}
+                    ),
+                    None,
+                )
+            if existing_relation:
+                existing_relation.confidence = float(candidate.get("score", 1.0))
+                stored_provenance = dict(existing_relation.provenance)
+                evidence = list(stored_provenance.get("evidence", []))
+                if stored_provenance.get("snippet"):
+                    evidence.append({
+                        "snippet": stored_provenance["snippet"],
+                        "source_offsets": stored_provenance.get("source_offsets", {}),
+                        "page": stored_provenance.get("page"),
+                    })
+                evidence.append({
+                    "snippet": provenance["snippet"],
+                    "source_offsets": provenance["source_offsets"],
+                    "page": provenance["page"],
+                })
+                unique_evidence = {
+                    (
+                        item.get("snippet"),
+                        item.get("source_offsets", {}).get("start"),
+                        item.get("source_offsets", {}).get("end"),
+                        item.get("page"),
+                    ): item
+                    for item in evidence
+                }
+                provenance["evidence"] = list(unique_evidence.values())
+                existing_relation.provenance = provenance
+            else:
+                state_graph.add_fact(
+                    subject,
+                    predicate,
+                    obj,
+                    source=document_id,
+                    confidence=float(candidate.get("score", 1.0)),
+                    relation_type="candidate",
+                    provenance=provenance,
+                )
+        persist_graph()
+        unique_facts = {
+            (entity_key(relation.subject), predicate_key(relation.predicate), entity_key(relation.obj))
+            for relation in state_graph.relations
+            if relation.source == document_id and relation.relation_type == "candidate"
+        }
+        return len(unique_facts)
+
+    def fail_document_processing(document: Dict[str, Any], error: Exception) -> None:
+        document["processing_status"] = "failed"
+        document["processing_error"] = str(error)
+        document["updated_at"] = datetime.now(timezone.utc).isoformat()
+        persist_documents()
+
     def list_checkpoints(root: str | Path, suffix: str) -> list[str]:
         path = Path(root)
         if not path.exists():
@@ -212,6 +346,12 @@ def create_app(graph: Optional[KnowledgeGraph] = None, model_config: Optional[Di
         public["preview"] = document.get("text", "")[:240]
         public["text_length"] = len(document.get("text", ""))
         return public
+
+    def document_page(offset: int, pages: list[Dict[str, Any]]) -> Optional[int]:
+        for page in pages:
+            if page["start"] <= offset < page["end"]:
+                return page["page"]
+        return None
 
     @app.get("/")
     def index() -> Any:
@@ -311,6 +451,13 @@ def create_app(graph: Optional[KnowledgeGraph] = None, model_config: Optional[Di
         items = sorted(documents.values(), key=lambda row: row["updated_at"], reverse=True)
         return jsonify({"documents": [public_document(item) for item in items]})
 
+    @app.get("/documents/<document_id>")
+    def get_document(document_id: str) -> Any:
+        document = documents.get(document_id)
+        if document is None:
+            return jsonify({"error": "Document not found."}), 404
+        return jsonify({"document": {**public_document(document), "text": document.get("text", "")}})
+
     @app.post("/documents")
     def create_document() -> Any:
         payload = request.get_json(force=True, silent=True) or {}
@@ -327,6 +474,8 @@ def create_app(graph: Optional[KnowledgeGraph] = None, model_config: Optional[Di
             "document_id": document_id,
             "text": text,
             "status": "stored",
+            "processing_status": "uploaded",
+            "source_pages": [],
             "entities": [],
             "candidate_relations": [],
             "created_at": now,
@@ -345,7 +494,8 @@ def create_app(graph: Optional[KnowledgeGraph] = None, model_config: Optional[Di
         if len(content) > max_upload_bytes:
             return jsonify({"error": f"Upload exceeds the configured {max_upload_bytes}-byte limit."}), 413
         try:
-            text = extract_document_text(filename, content)
+            extracted = extract_document_with_provenance(filename, content)
+            text = extracted["text"]
         except (RuntimeError, ValueError) as error:
             return jsonify({"error": str(error)}), 400
         if not text.strip():
@@ -368,6 +518,8 @@ def create_app(graph: Optional[KnowledgeGraph] = None, model_config: Optional[Di
             "file_size": len(content),
             "text": text,
             "status": "stored",
+            "processing_status": "uploaded",
+            "source_pages": extracted["pages"],
             "entities": [],
             "candidate_relations": [],
             "created_at": now,
@@ -444,25 +596,55 @@ def create_app(graph: Optional[KnowledgeGraph] = None, model_config: Optional[Di
         if candidate.get("status") != "extracted_candidate":
             return jsonify({"error": "Candidate has already been reviewed."}), 409
         if decision == "approve":
-            relation = state_graph.add_fact(
+            state_graph.add_entity(
                 candidate["subject"],
-                candidate["label"],
+                candidate["subject"],
+                {"entity_type": candidate.get("subject_label", "ENTITY")},
+            )
+            state_graph.add_entity(
                 candidate["object"],
-                source=document_id,
-                confidence=float(candidate.get("score", 1.0)),
-                relation_type="human_reviewed",
-                provenance={
+                candidate["object"],
+                {"entity_type": candidate.get("object_label", "ENTITY")},
+            )
+            reviewed_provenance = {
                     "document_id": document_id,
                     "snippet": candidate["evidence_snippet"],
                     "source_offsets": candidate.get("source_offsets", {}),
+                    "page": candidate.get("page"),
+                    "extraction_method": candidate.get("extraction_method", "trained_checkpoint"),
                     "reviewed_by": payload.get("reviewed_by", "api-user"),
-                },
+                }
+            relation = next(
+                (
+                    item for item in state_graph.query(candidate["subject"], candidate["label"], candidate["object"])
+                    if item.source == document_id and item.relation_type == "candidate"
+                ),
+                None,
             )
+            if relation:
+                relation.confidence = float(candidate.get("score", 1.0))
+                relation.relation_type = "human_reviewed"
+                if relation.provenance.get("evidence"):
+                    reviewed_provenance["evidence"] = relation.provenance["evidence"]
+                relation.provenance = reviewed_provenance
+            else:
+                relation = state_graph.add_fact(
+                    candidate["subject"],
+                    candidate["label"],
+                    candidate["object"],
+                    source=document_id,
+                    confidence=float(candidate.get("score", 1.0)),
+                    relation_type="human_reviewed",
+                    provenance=reviewed_provenance,
+                )
             persist_graph()
             candidate["reviewed_relation"] = relation.to_dict()
             candidate["status"] = "human_reviewed"
         else:
             candidate["status"] = "rejected"
+        for fact in document.get("key_facts", []):
+            if fact.get("subject") == candidate["subject"] and fact.get("predicate") == candidate["label"] and fact.get("object") == candidate["object"]:
+                fact["status"] = candidate["status"]
         document["updated_at"] = datetime.now(timezone.utc).isoformat()
         document["status"] = "review_required" if any(item["status"] == "extracted_candidate" for item in document["candidate_relations"]) else "reviewed"
         persist_documents()
@@ -695,86 +877,89 @@ def create_app(graph: Optional[KnowledgeGraph] = None, model_config: Optional[Di
         supplied_text = payload.get("text")
         if supplied_text is not None and supplied_text != document.get("text"):
             return jsonify({"error": "Extraction text must match the text stored for this document."}), 409
+        with lock:
+            if document.get("processing_status") == "analyzing":
+                return jsonify({"error": "This document is already being analyzed."}), 409
+            document["processing_status"] = "processing"
+            document.pop("processing_error", None)
+            persist_documents()
         text = document["text"]
         try:
-            missing_checkpoints = [name for name in ("ner_checkpoint", "relation_checkpoint") if not payload.get(name)]
-            if missing_checkpoints:
-                available = nlp_checkpoint_catalog()
-                available_tasks = sorted({item.get("task") for item in available if item.get("compatible")})
-                missing_tasks = [task for task in ("ner", "relation") if task not in available_tasks]
-                missing_labels = [("NER" if task == "ner" else "relation") for task in missing_tasks]
-                raise ValueError(
-                    f"Select a compatible NER and relation checkpoint. Missing compatible model(s): "
-                    f"{', '.join(missing_labels) or ', '.join(missing_checkpoints)}. "
-                    "Train them in Model Lab or use the clearly labeled demo setup."
-                )
-            ner_checkpoint = checkpoint_path(payload["ner_checkpoint"], nlp_pipeline.checkpoint_dir)
-            relation_checkpoint = checkpoint_path(payload["relation_checkpoint"], nlp_pipeline.checkpoint_dir)
-            ner_metadata = json.loads((ner_checkpoint / "metadata.json").read_text(encoding="utf-8"))
-            relation_metadata = json.loads((relation_checkpoint / "metadata.json").read_text(encoding="utf-8"))
-            if ner_metadata.get("task") != "ner" or relation_metadata.get("task") != "relation":
-                raise ValueError("Selected checkpoints are not a compatible NER checkpoint and relation checkpoint.")
-            recognizer = EntityRecognizer(ner_checkpoint)
-            classifier = RelationExtractor(relation_checkpoint)
-            chunks = _text_chunks(text)
-            entities = []
-            candidates = []
-            pair_budget_per_chunk = int(settings.get("max_candidate_pairs_per_chunk", 256))
-            if pair_budget_per_chunk < 1:
-                raise ValueError("max_candidate_pairs_per_chunk must be positive.")
-            pairs_scored = 0
-            pairs_skipped_by_budget = 0
-            for chunk_start, chunk in chunks:
-                chunk_pairs_scored = 0
-                chunk_entities = recognizer.infer(chunk)
-                for entity in chunk_entities:
-                    entities.append({
-                        **entity,
-                        "start": entity["start"] + chunk_start,
-                        "end": entity["end"] + chunk_start,
-                    })
-                for subject in chunk_entities:
-                    for obj in chunk_entities:
-                        if subject is obj or (
-                            subject["start"] < obj["end"] and obj["start"] < subject["end"]
-                        ):
-                            continue
-                        if chunk_pairs_scored >= pair_budget_per_chunk:
-                            pairs_skipped_by_budget += 1
-                            continue
-                        chunk_pairs_scored += 1
-                        pairs_scored += 1
-                        prediction = classifier.predict(
-                            chunk,
-                            {"start": subject["start"], "end": subject["end"]},
-                            {"start": obj["start"], "end": obj["end"]},
-                        )
-                        if prediction["label"].lower() in {"no_relation", "not_a_relation", "none"}:
-                            continue
-                        candidates.append({
-                            **prediction,
-                            "subject_label": subject["label"],
-                            "object_label": obj["label"],
-                            "synthetic_model": bool(
-                                ner_metadata.get("synthetic_data") or relation_metadata.get("synthetic_data")
-                            ),
-                            "status": "extracted_candidate",
-                            "document_id": document_id,
-                            "evidence_snippet": chunk.strip(),
-                            "source_offsets": {
-                                "start": chunk_start + min(subject["start"], obj["start"]),
-                                "end": chunk_start + max(subject["end"], obj["end"]),
-                            },
-                            "subject_offsets": {"start": subject["start"] + chunk_start, "end": subject["end"] + chunk_start},
-                            "object_offsets": {"start": obj["start"] + chunk_start, "end": obj["end"] + chunk_start},
-                            "requires_human_review": True,
+            catalog = [item for item in nlp_checkpoint_catalog() if item["compatible"]]
+            ner_options = [item["path"] for item in catalog if item.get("task") == "ner"]
+            relation_options = [item["path"] for item in catalog if item.get("task") == "relation"]
+            ner_path = payload.get("ner_checkpoint") or (ner_options[0] if ner_options else None)
+            relation_path = payload.get("relation_checkpoint") or (relation_options[0] if relation_options else None)
+            use_checkpoints = bool(ner_path and relation_path)
+            if use_checkpoints:
+                ner_checkpoint = checkpoint_path(ner_path, nlp_pipeline.checkpoint_dir)
+                relation_checkpoint = checkpoint_path(relation_path, nlp_pipeline.checkpoint_dir)
+                ner_metadata = json.loads((ner_checkpoint / "metadata.json").read_text(encoding="utf-8"))
+                relation_metadata = json.loads((relation_checkpoint / "metadata.json").read_text(encoding="utf-8"))
+                if ner_metadata.get("task") != "ner" or relation_metadata.get("task") != "relation":
+                    raise ValueError("Selected checkpoints are not a compatible NER checkpoint and relation checkpoint.")
+                recognizer = EntityRecognizer(ner_checkpoint)
+                classifier = RelationExtractor(relation_checkpoint)
+                chunks = _text_chunks(text)
+                entities = []
+                candidates = []
+                pair_budget_per_chunk = int(settings.get("max_candidate_pairs_per_chunk", 256))
+                if pair_budget_per_chunk < 1:
+                    raise ValueError("max_candidate_pairs_per_chunk must be positive.")
+                pairs_scored = 0
+                pairs_skipped_by_budget = 0
+                for chunk_start, chunk in chunks:
+                    chunk_pairs_scored = 0
+                    chunk_entities = recognizer.infer(chunk)
+                    for entity in chunk_entities:
+                        entity_start = entity["start"] + chunk_start
+                        entities.append({
+                            **entity,
+                            "start": entity_start,
+                            "end": entity["end"] + chunk_start,
+                            "page": document_page(entity_start, document.get("source_pages", [])),
                         })
-            now = datetime.now(timezone.utc).isoformat()
-            document.update({
-                "entities": entities,
-                "candidate_relations": candidates,
-                "status": "review_required" if candidates else "extracted",
-                "extraction": {
+                    for subject in chunk_entities:
+                        for obj in chunk_entities:
+                            if subject is obj or (
+                                subject["start"] < obj["end"] and obj["start"] < subject["end"]
+                            ):
+                                continue
+                            if chunk_pairs_scored >= pair_budget_per_chunk:
+                                pairs_skipped_by_budget += 1
+                                continue
+                            chunk_pairs_scored += 1
+                            pairs_scored += 1
+                            prediction = classifier.predict(
+                                chunk,
+                                {"start": subject["start"], "end": subject["end"]},
+                                {"start": obj["start"], "end": obj["end"]},
+                            )
+                            if prediction["label"].lower() in {"no_relation", "not_a_relation", "none"}:
+                                continue
+                            source_start = chunk_start + min(subject["start"], obj["start"])
+                            evidence_row = source_sentence_at(text, source_start)
+                            source_start = evidence_row["start"]
+                            source_end = evidence_row["end"]
+                            candidates.append({
+                                **prediction,
+                                "subject_label": subject["label"],
+                                "object_label": obj["label"],
+                                "synthetic_model": bool(
+                                    ner_metadata.get("synthetic_data") or relation_metadata.get("synthetic_data")
+                                ),
+                                "status": "extracted_candidate",
+                                "relation_type": "candidate",
+                                "document_id": document_id,
+                                "evidence_snippet": evidence_row["text"] or chunk.strip(),
+                                "source_offsets": {"start": source_start, "end": source_end},
+                                "subject_offsets": {"start": subject["start"] + chunk_start, "end": subject["end"] + chunk_start},
+                                "object_offsets": {"start": obj["start"] + chunk_start, "end": obj["end"] + chunk_start},
+                                "page": document_page(source_start, document.get("source_pages", [])),
+                                "requires_human_review": True,
+                                "extraction_method": "trained_checkpoint",
+                            })
+                extraction = {
                     "ner_checkpoint": str(ner_checkpoint),
                     "relation_checkpoint": str(relation_checkpoint),
                     "synthetic_models": bool(
@@ -785,15 +970,93 @@ def create_app(graph: Optional[KnowledgeGraph] = None, model_config: Optional[Di
                     "candidate_count": len(candidates),
                     "pairs_scored": pairs_scored,
                     "pairs_skipped_by_budget": pairs_skipped_by_budget,
+                    "method": "trained_checkpoint",
                     "coverage_note": "Model output is a best-effort candidate extraction, not a guarantee of all facts in the document.",
-                },
+                }
+            else:
+                analysis = analyze_with_rules(text, document.get("source_pages", []))
+                entities = analysis["entities"]
+                candidates = analysis["candidate_relations"]
+                extraction = {
+                    "method": analysis["extraction_method"],
+                    "entity_count": len(entities),
+                    "candidate_count": len(candidates),
+                    "coverage_note": "Rule-matched extraction is limited to supported name and relationship patterns; review every candidate.",
+                }
+                for candidate in candidates:
+                    candidate["document_id"] = document_id
+            summary_data = analyze_with_rules(text, document.get("source_pages", []))
+            key_facts = [
+                {
+                    "text": item["evidence_snippet"],
+                    "source_offsets": item["source_offsets"],
+                    "page": item.get("page"),
+                    "subject": item["subject"],
+                    "predicate": item["label"],
+                    "object": item["object"],
+                    "status": item["status"],
+                }
+                for item in candidates
+            ]
+            graph_candidate_count = store_extraction_in_graph(
+                document_id,
+                entities,
+                candidates,
+                extraction["method"],
+            )
+            now = datetime.now(timezone.utc).isoformat()
+            document.update({
+                "entities": entities,
+                "candidate_relations": candidates,
+                "status": "review_required" if candidates else "extracted",
+                "processing_status": "ready",
+                "summary": summary_data["summary"],
+                "summary_method": summary_data["summary_method"],
+                "key_facts": key_facts,
+                "extraction": extraction,
+                "graph_candidate_count": graph_candidate_count,
                 "updated_at": now,
             })
             documents[document_id] = document
             persist_documents()
-            return jsonify({"entities": entities, "candidate_relations": candidates, "inserted_into_graph": False})
+            return jsonify({
+                "status": "ready",
+                "summary": document["summary"],
+                "summary_method": document["summary_method"],
+                "key_facts": key_facts,
+                "entities": entities,
+                "candidate_relations": candidates,
+                "extraction": extraction,
+                "graph_candidate_count": graph_candidate_count,
+                "inserted_into_graph": False,
+                "candidates_in_graph": True,
+            })
         except (KeyError, OSError, ValueError, RuntimeError) as error:
+            fail_document_processing(document, error)
             return jsonify({"error": str(error)}), 400
+        except Exception as error:
+            app.logger.exception("Unexpected document analysis failure for %s", document_id)
+            fail_document_processing(document, error)
+            return jsonify({"error": f"Document analysis failed: {error}"}), 500
+
+    @app.post("/documents/<document_id>/ask")
+    def ask_document(document_id: str) -> Any:
+        payload = request.get_json(force=True, silent=True) or {}
+        query = payload.get("query", "")
+        if not isinstance(query, str) or not query.strip():
+            return jsonify({"error": "Enter a question about this document."}), 400
+        document = documents.get(document_id)
+        if document is None:
+            return jsonify({"error": "Document not found."}), 404
+        if document.get("processing_status") != "ready":
+            return jsonify({"error": "Analyze this document before asking a question."}), 409
+        return jsonify(rag.answer(query, document_context={
+            "text": document.get("text", ""),
+            "filename": document.get("filename", document_id),
+            "document_id": document_id,
+            "pages": document.get("source_pages", []),
+            "candidate_relations": document.get("candidate_relations", []),
+        }))
 
     @app.post("/verify")
     def verify_claim() -> Any:
@@ -861,6 +1124,20 @@ def create_app(graph: Optional[KnowledgeGraph] = None, model_config: Optional[Di
         query = payload.get("query", "")
         if not isinstance(query, str) or not query.strip():
             return jsonify({"error": "A non-empty query is required."}), 400
+        document_id = payload.get("document_id")
+        if document_id:
+            document = documents.get(document_id)
+            if document is None:
+                return jsonify({"error": "Document not found."}), 404
+            if document.get("processing_status") != "ready":
+                return jsonify({"error": "Analyze this document before asking a question."}), 409
+            return jsonify(rag.answer(query, document_context={
+                "text": document.get("text", ""),
+                "filename": document.get("filename", document_id),
+                "document_id": document_id,
+                "pages": document.get("source_pages", []),
+                "candidate_relations": document.get("candidate_relations", []),
+            }))
         return jsonify(rag.answer(query))
 
     return app

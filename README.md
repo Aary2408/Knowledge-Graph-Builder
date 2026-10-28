@@ -1,6 +1,6 @@
 # KnowGraph AI
 
-KnowGraph AI is a local knowledge-graph research workspace. It combines provenance-preserving graph storage, trainable NLP and GNN models, evidence-grounded verification and retrieval, a Flask API, and a responsive web interface.
+KnowGraph AI is a local document-intelligence workspace. Upload a PDF, TXT, Markdown, or DOCX file, analyze it without configuring models, review its extracted facts, explore the graph, and ask questions against source excerpts. Documents and graphs are stored locally by default.
 
 The application does not bundle benchmark corpora or claim benchmark performance. Pretrained transformer runs require a locally available model or a download from Hugging Face. Small synthetic examples are for pipeline smoke tests only.
 
@@ -11,9 +11,11 @@ The application does not bundle benchmark corpora or claim benchmark performance
 - **Link prediction:** PyTorch Geometric R-GCN encoder with DistMult scoring, negative sampling, validation loss, filtered head-and-tail MRR/Hits@K, and a train-graph degree baseline. Fixed WN18RR/FB15k-237 split loading is supported. Predicted edges are candidates, never facts.
 - **Claim verification:** `SUPPORTED`, `REFUTED`, and `NOT ENOUGH INFORMATION` are distinct. Missing graph facts do not imply refutation. Optional transformer NLI fine-tuning reports accuracy, macro-F1, per-class results, and confusion matrix.
 - **FEVER preparation/evaluation:** the local JSONL adapter preserves claim labels and evidence page/sentence references. Evidence retrieval is evaluated separately from classification against source/document IDs already present in the graph; no passages or citations are fabricated.
-- **GraphRAG:** retrieves source-backed graph facts and provenance. Predictions are omitted from evidence by default.
+- **GraphRAG:** retrieves source-backed graph facts and provenance. Predictions are omitted from evidence by default. Document questions can also retrieve excerpts directly from the selected source and return an explicit uncertainty response when no evidence matches.
 - **Model Lab:** background NLP/GNN/NLI jobs, validation, status/log polling, losses, checkpoint discovery, and inference endpoints.
-- **Web application:** Overview, Knowledge Graph, Documents, Claim Verification, GraphRAG Assistant, Evidence Explorer, Model Lab, Dataset Manager, Experiments, and Settings. Counts and activity come from the API and local stores; no trend charts or decorative performance claims are generated.
+- **Web application:** Home, Documents, Knowledge Graph, Ask AI, and Advanced Lab. Model training, NER/relation settings, GNN/NLI, datasets, checkpoints, experiments, claim verification, evidence inspection, and system settings remain available in Advanced Lab.
+- **One-click document analysis:** compatible NER and relation checkpoints are selected automatically when both are available. Otherwise, a clearly labeled lightweight rule-based extractor handles supported name/relationship patterns. It is not a trained model and is not exhaustive. Extracted entities and candidate edges are persisted in the existing graph with candidate status; they become human-reviewed facts only after approval.
+- **Source evidence:** summaries are extractive source sentences, not generated claims. Extracted relationships retain exact source excerpts and offsets; PDF page references are preserved when available. Questions return matching source excerpts, not fabricated citations.
 
 ## Install and run
 
@@ -45,9 +47,11 @@ The default graph is persisted at `data/knowledge_graph.json` and source documen
 
 The default NER model is `distilbert/distilbert-base-uncased`; NLI defaults to `cross-encoder/nli-distilroberta-base`. First use may download model files (hundreds of MB, depending on model). For offline training, use `--pretrained-model /local/model/directory`. If a model cannot be loaded, training fails explicitly; no untrained transformer is presented as fine-tuned.
 
-### Offline document-extraction setup
+### Document analysis methods
 
-The Documents page requires a compatible saved NER checkpoint and relation checkpoint. If either is missing, use **Train lightweight demo checkpoints**. This starts real background PyTorch training for both tasks on `data/sample_nlp_dataset.json`; the saved metadata marks these checkpoints as synthetic smoke models. They let you exercise extraction, candidate review, and provenance locally, but are not evidence of useful accuracy and should not be used to extract research facts without careful review.
+The primary upload flow does not require checkpoints. When compatible NER and relation checkpoints are available, the application selects them automatically and marks results as checkpoint-based candidates. If a compatible pair is not available, it uses explicit rule matches for common relationships (including employment, founding, location, product development, partnership, and research). Rule-based results are labeled as such; they are not trained-model output and are not exhaustive. Extracted triples, entity mentions, confidence scores, and source excerpts with page/offset provenance are persisted in the graph. Review the source excerpt before approving any relationship into the graph.
+
+The Advanced Lab still offers **Train lightweight demo checkpoints**. This starts real background PyTorch training for both tasks on `data/sample_nlp_dataset.json`; the saved metadata marks these checkpoints as synthetic smoke models. They let you exercise the model workflow locally, but are not evidence of useful accuracy and should not be used to extract research facts without careful review.
 
 For a local NER run on your own labeled dataset, select **Lightweight local PyTorch** in Model Lab. It uses aligned `ner_tokens` and `ner_tags`, trains a local feature/embedding classifier from scratch, saves weights and label/feature maps under `checkpoints/nlp/ner-local-*`, and is available without downloading a pretrained model. To avoid the open-vocabulary false positives common to a tiny from-scratch model, unseen tokens are conservatively labeled `O`; this makes it unsuitable for general entity extraction. For real document use, select **Pretrained transformer fine-tuning** and provide a cached model or a model ID with network access, and train on appropriately labeled data. Relation checkpoints are trained separately from the same labeled JSON format and saved under `checkpoints/nlp/relation-*`. Both model types must be saved and selected for document extraction.
 
@@ -67,7 +71,7 @@ Replace the sample path with a prepared labeled dataset for real use. The bundle
 
 The programmatic first-run equivalent is to POST `{}` to `/nlp/demo-setup`; it returns a background job ID. Poll `/jobs/<job_id>` until completion, then retrieve the compatible paths from `/models` (`nlp_by_task.ner` and `nlp_by_task.relation`). The endpoint performs actual training and returns logs, losses, evaluation, and an explicit synthetic-data warning; it does not install pre-trained or untrained placeholder checkpoints.
 
-An extraction candidate is a model prediction, not a verified fact. Each candidate retains its source document ID, snippet, and offsets. Only a human approval adds the relationship to the graph with provenance. Extraction is best-effort, may miss facts, and is bounded by the configured candidate-pair budget.
+An extraction candidate (whether produced by a trained model or explicit rules) is not a verified fact. Each candidate retains its source document ID, excerpt, and offsets. Candidates are visible in the graph with a distinct type but remain excluded from factual RAG and claim verification. Human approval promotes the same graph edge to `human_reviewed` with provenance. Extraction is best-effort and may miss facts. Scanned PDFs require OCR before ingestion; OCR is not bundled.
 
 ## Dataset access and preparation
 
@@ -200,15 +204,15 @@ Each checkpoint includes weights and task mappings/configuration. Training runs 
 
 - `GET /`, `GET /health`, `GET /overview`, `GET /graph`
 - `POST /graph/fact`, `POST /graph/review`
-- `GET /documents`, `POST /documents`, `POST /documents/upload`, `POST /documents/extract`, `POST /documents/<id>/review`
+- `GET /documents`, `GET /documents/<id>`, `POST /documents`, `POST /documents/upload`, `POST /documents/extract`, `POST /documents/<id>/ask`, `POST /documents/<id>/review`
 - `GET /datasets`, `POST /nlp/dataset/validate`, `POST /verify/dataset/validate`, `POST /gnn/dataset/validate`
 - `POST /nlp/train`, `POST /gnn/train`, `POST /verify/train`
 - `GET /jobs/<job_id>`, `POST /jobs/<job_id>/cancel`, `POST /jobs/<job_id>/retry`, `GET /experiments`, `GET /models`, `POST /models/load`
 - `POST /nlp/infer`, `POST /gnn/predict`, `POST /verify`, `POST /rag`
 
-In **Documents**, upload UTF-8 TXT/Markdown, text-based PDF, or DOCX (16 MB request limit by default), or paste text. PDF uses `pypdf`; scanned/image PDFs need OCR before upload. Select saved NER and relation checkpoints, then use **Upload + extract** or upload first and extract later. Extraction chunks long text, finds model-labeled entity spans, scores directed entity pairs, and keeps source snippets and offsets. These are best-effort model predictions—not a guarantee that every fact has been found or is true. Approve candidates individually to create graph nodes/edges with document provenance; rejected/unreviewed candidates never enter the graph.
+In **Home** or **Documents**, upload UTF-8 TXT/Markdown, text-based PDF, or DOCX (16 MB request limit by default), or paste text, then click **Analyze Document**. Drag/drop and file browsing are supported. PDF uses `pypdf`; scanned/image PDFs need OCR before upload. The app automatically uses a compatible saved NER/relation checkpoint pair when available; otherwise it uses its explicitly identified lightweight rule-based extractor. The analysis shows an extractive source summary, entity spans, relation candidates, and their source excerpts. Candidate relationships and entities are persisted in the existing graph with `candidate` status so they can be explored, but candidates are excluded from factual GraphRAG and claim verification. Approving a candidate changes that graph edge to `human_reviewed` with document provenance. Use Ask AI to retrieve document excerpts; unsupported questions are returned as insufficient evidence.
 
-Uploads are stored under `data/uploads/`, extracted text/document metadata under `data/documents.json`, and the default graph under `data/knowledge_graph.json`. Configure `uploads_path`, `max_upload_bytes`, and the other roots through `create_app(..., model_config={...})`. The graph explorer uses real graph entities/relationships with selection, search, relation filters, wheel zoom, and drag pan. The assistant cites only source IDs returned by graph retrieval.
+Uploads are stored under `data/uploads/`, extracted text/document metadata under `data/documents.json`, and the default graph under `data/knowledge_graph.json`. Configure `uploads_path`, `max_upload_bytes`, and the other roots through `create_app(..., model_config={...})`. The graph explorer uses real graph entities/relationships with selection, search, entity/relation filters, edge evidence inspection, wheel zoom, and drag pan. The Ask AI section reuses GraphRAG retrieval: it can scope to an analyzed document's saved text and candidates or query across approved graph evidence.
 
 ## Tests and honest reporting
 

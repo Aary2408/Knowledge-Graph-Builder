@@ -10,6 +10,10 @@ SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf", ".docx"}
 
 
 def extract_document_text(filename: str, content: bytes) -> str:
+    return extract_document_with_provenance(filename, content)["text"]
+
+
+def extract_document_with_provenance(filename: str, content: bytes) -> dict:
     extension = Path(filename).suffix.lower()
     if extension not in SUPPORTED_EXTENSIONS:
         raise ValueError(f"Unsupported document type {extension or '(none)'}. Upload TXT, Markdown, PDF, or DOCX.")
@@ -17,7 +21,7 @@ def extract_document_text(filename: str, content: bytes) -> str:
         raise ValueError("The uploaded file is empty.")
     if extension in {".txt", ".md"}:
         try:
-            return content.decode("utf-8-sig").strip()
+            return {"text": content.decode("utf-8-sig").strip(), "pages": []}
         except UnicodeDecodeError as error:
             raise ValueError("Text files must use UTF-8 encoding.") from error
     if extension == ".pdf":
@@ -27,7 +31,18 @@ def extract_document_text(filename: str, content: bytes) -> str:
             raise RuntimeError("PDF text extraction requires pypdf. Install the project requirements and retry.") from error
         try:
             reader = PdfReader(BytesIO(content), strict=True)
-            return "\n\n".join(page.extract_text() or "" for page in reader.pages).strip()
+            text = ""
+            pages = []
+            for page_number, page in enumerate(reader.pages, start=1):
+                page_text = (page.extract_text() or "").strip()
+                if not page_text:
+                    continue
+                if text:
+                    text += "\n\n"
+                start = len(text)
+                text += page_text
+                pages.append({"page": page_number, "start": start, "end": len(text)})
+            return {"text": text.strip(), "pages": pages}
         except Exception as error:
             raise ValueError(f"Could not read the uploaded PDF: {error}") from error
     try:
@@ -51,4 +66,4 @@ def extract_document_text(filename: str, content: bytes) -> str:
         paragraph_text = "".join(pieces).strip()
         if paragraph_text:
             paragraphs.append(paragraph_text)
-    return "\n".join(paragraphs).strip()
+    return {"text": "\n".join(paragraphs).strip(), "pages": []}

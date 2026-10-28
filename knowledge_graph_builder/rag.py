@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .graph import KnowledgeGraph, Relation
+from .document_analysis import answer_from_document
 
 
 @dataclass
@@ -80,7 +81,46 @@ class GraphRAGEngine:
         results.sort(key=lambda result: result.score, reverse=True)
         return results[:top_k]
 
-    def answer(self, query: str) -> Dict[str, Any]:
+    def answer(self, query: str, document_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        if document_context:
+            answer = answer_from_document(
+                query,
+                document_context.get("text", ""),
+                document_context.get("filename", document_context.get("document_id", "document")),
+                document_context.get("document_id", ""),
+                document_context.get("pages", []),
+                document_context.get("candidate_relations", []),
+            )
+            supporting_graph = self.retrieve(query, top_k=int(self.config.get("top_k", 5)))
+            graph_evidence = [
+                {
+                    "fact": match.snippet,
+                    "source": match.provenance.get("source"),
+                    "provenance": match.provenance,
+                    "graph_path": match.graph_path,
+                    "score": match.score,
+                    "relation_type": match.relation_type,
+                }
+                for match in supporting_graph
+                if match.provenance.get("document_id") == document_context.get("document_id")
+            ]
+            return {
+                **answer,
+                "evidence": [
+                    {
+                        "fact": item["excerpt"],
+                        "excerpt": item["excerpt"],
+                        "source": item["source"],
+                        "document_id": item["document_id"],
+                        "page": item["page"],
+                        "source_offsets": item["source_offsets"],
+                        "relation_type": "source_excerpt",
+                    }
+                    for item in answer["evidence"]
+                ] + graph_evidence,
+                "graph_evidence": graph_evidence,
+                "limitations": "Answers retrieve matching excerpts from the selected source and supporting stored graph facts. Retrieval does not establish truth or generate independent citations.",
+            }
         matches = self.retrieve(query, top_k=int(self.config.get("top_k", 5)))
         candidates = self.retrieve(query, top_k=int(self.config.get("top_k", 5)), include_predictions=True)
         candidates = [
