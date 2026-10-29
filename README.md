@@ -19,21 +19,20 @@ The application does not bundle benchmark corpora or claim benchmark performance
 
 ## Install and run
 
-Python 3.11–3.14 is supported by this source tree. Install a PyTorch wheel appropriate for the host first, then the remaining requirements.
+Python 3.11–3.14 is supported by this source tree. The requirements install a CPU-only PyTorch wheel, which keeps deployments from downloading CUDA libraries they cannot use.
 
-### CPU
+### CPU (default)
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
 python -m pip install -r requirements.txt
 ```
 
 ### Optional GPU
 
-Install PyTorch using the official selector for the host CUDA version, then install `requirements.txt`. PyTorch Geometric uses that PyTorch installation. `device=auto` uses CUDA when available; `cpu` forces CPU. Verify CUDA availability in the chosen environment before starting large experiments.
+Replace the CPU-only PyTorch wheel with the wheel selected for the host CUDA version using the official PyTorch selector. PyTorch Geometric uses that PyTorch installation. `device=auto` uses CUDA when available; `cpu` forces CPU. Verify CUDA availability in the chosen environment before starting large experiments.
 
 Start the web workspace:
 
