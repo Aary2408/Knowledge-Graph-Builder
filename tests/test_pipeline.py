@@ -1,4 +1,6 @@
+import hashlib
 import json
+import re
 import time
 from io import BytesIO
 from types import SimpleNamespace
@@ -354,9 +356,21 @@ def test_frontend_and_document_api_persist_local_state(tmp_path):
     assert b"KnowGraph AI" in page.data
     assert page.data.count(b'class="nav-item') == 5
     assert all(label in page.data for label in (b"Home", b"Documents", b"Knowledge Graph", b"Ask AI", b"Advanced Lab"))
-    assert client.get("/static/app.css").status_code == 200
-    assert client.get("/static/app.js").status_code == 200
-    assert client.get("/static/graph-explorer.js").status_code == 200
+    assert page.headers["Cache-Control"] == "no-cache, must-revalidate"
+    assert page.get_etag()[0] == hashlib.sha256(page.data).hexdigest()
+    assert client.get("/", headers={"If-None-Match": page.headers["ETag"]}).status_code == 304
+    for filename in ("app.css", "app.js", "graph-explorer.js"):
+        versioned_path = re.search(
+            rb"/static/" + filename.encode() + rb"\?v=([a-f0-9]{64})",
+            page.data,
+        )
+        assert versioned_path
+        asset_url = versioned_path.group(0).decode()
+        asset = client.get(asset_url)
+        assert asset.status_code == 200
+        assert hashlib.sha256(asset.data).hexdigest() == versioned_path.group(1).decode()
+        assert asset.headers["Cache-Control"] == "public, max-age=31536000, immutable"
+    assert client.get("/static/app.css").headers["Cache-Control"] == "no-cache, must-revalidate"
     assert b"/static/graph-explorer.js" in client.get("/").data
     created = client.post("/documents", json={"document_id": "doc-local", "text": "Ada works at Acme."})
     assert created.status_code == 201

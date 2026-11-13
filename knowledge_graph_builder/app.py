@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import uuid
@@ -48,6 +49,31 @@ def create_app(graph: Optional[KnowledgeGraph] = None, model_config: Optional[Di
     if Flask is None:
         raise RuntimeError("Flask is required to create the web application. Install it with `pip install Flask`.")
     app = Flask(__name__, static_folder=str(Path(__file__).with_name("static")))
+    static_dir = Path(app.static_folder)
+    asset_versions = {
+        filename: hashlib.sha256((static_dir / filename).read_bytes()).hexdigest()
+        for filename in ("app.css", "graph-explorer.js", "app.js")
+    }
+    index_html = (static_dir / "index.html").read_text(encoding="utf-8")
+    for filename, version in asset_versions.items():
+        index_html = index_html.replace(
+            f"/static/{filename}",
+            f"/static/{filename}?v={version}",
+        )
+    index_etag = hashlib.sha256(index_html.encode("utf-8")).hexdigest()
+
+    @app.after_request
+    def set_frontend_cache_policy(response: Any) -> Any:
+        if request.path == "/":
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        elif request.path.startswith("/static/"):
+            filename = Path(request.path).name
+            if request.args.get("v") == asset_versions.get(filename):
+                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            else:
+                response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
     settings = dict(model_config or {})
     max_upload_bytes = int(settings.get("max_upload_bytes", 16 * 1024 * 1024))
     if max_upload_bytes < 1:
@@ -355,7 +381,9 @@ def create_app(graph: Optional[KnowledgeGraph] = None, model_config: Optional[Di
 
     @app.get("/")
     def index() -> Any:
-        return app.send_static_file("index.html")
+        response = app.response_class(index_html, mimetype="text/html")
+        response.set_etag(index_etag)
+        return response.make_conditional(request)
 
     @app.get("/health")
     def health() -> Any:

@@ -40,7 +40,7 @@ Start the web workspace:
 python -m knowledge_graph_builder
 ```
 
-Open `http://127.0.0.1:5000`. The app binds to loopback by default. The vanilla HTML/CSS/JavaScript frontend is served by Flask; there is no separate Node build or external font/runtime dependency.
+Open `http://127.0.0.1:5000`. The app binds to loopback by default. The vanilla HTML/CSS/JavaScript frontend is served by Flask; there is no separate Node build or external font/runtime dependency. The homepage is revalidated on each visit, and static assets use content-hashed URLs so browsers can safely cache unchanged files across deployments.
 
 The default graph is persisted at `data/knowledge_graph.json` and source documents at `data/documents.json`. Configure `graph_path`, `documents_path`, `dataset_dir`, and checkpoint/experiment roots through `create_app(..., model_config={...})` when embedding the app. Do not expose this development API publicly without authentication and deployment hardening.
 
