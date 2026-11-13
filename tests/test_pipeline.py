@@ -356,6 +356,8 @@ def test_frontend_and_document_api_persist_local_state(tmp_path):
     assert all(label in page.data for label in (b"Home", b"Documents", b"Knowledge Graph", b"Ask AI", b"Advanced Lab"))
     assert client.get("/static/app.css").status_code == 200
     assert client.get("/static/app.js").status_code == 200
+    assert client.get("/static/graph-explorer.js").status_code == 200
+    assert b"/static/graph-explorer.js" in client.get("/").data
     created = client.post("/documents", json={"document_id": "doc-local", "text": "Ada works at Acme."})
     assert created.status_code == 201
     assert created.json["document"]["status"] == "stored"

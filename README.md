@@ -211,7 +211,7 @@ Each checkpoint includes weights and task mappings/configuration. Training runs 
 
 In **Home** or **Documents**, upload UTF-8 TXT/Markdown, text-based PDF, or DOCX (16 MB request limit by default), or paste text, then click **Analyze Document**. Drag/drop and file browsing are supported. PDF uses `pypdf`; scanned/image PDFs need OCR before upload. The app automatically uses a compatible saved NER/relation checkpoint pair when available; otherwise it uses its explicitly identified lightweight rule-based extractor. The analysis shows an extractive source summary, entity spans, relation candidates, and their source excerpts. Candidate relationships and entities are persisted in the existing graph with `candidate` status so they can be explored, but candidates are excluded from factual GraphRAG and claim verification. Approving a candidate changes that graph edge to `human_reviewed` with document provenance. Use Ask AI to retrieve document excerpts; unsupported questions are returned as insufficient evidence.
 
-Uploads are stored under `data/uploads/`, extracted text/document metadata under `data/documents.json`, and the default graph under `data/knowledge_graph.json`. Configure `uploads_path`, `max_upload_bytes`, and the other roots through `create_app(..., model_config={...})`. The graph explorer uses real graph entities/relationships with selection, search, entity/relation filters, edge evidence inspection, wheel zoom, and drag pan. The Ask AI section reuses GraphRAG retrieval: it can scope to an analyzed document's saved text and candidates or query across approved graph evidence.
+Uploads are stored under `data/uploads/`, extracted text/document metadata under `data/documents.json`, and the default graph under `data/knowledge_graph.json`. Configure `uploads_path`, `max_upload_bytes`, and the other roots through `create_app(..., model_config={...})`. The knowledge graph explorer lays out stored relationships as a zoomable, pannable hierarchical tree with expandable entity nodes, labeled branches, and clickable references for cross-links and cycles. Search expands matching paths; type, relationship, and source filters, details, and provenance use the existing `/graph` and `/documents` APIs. Root and connection paging keeps large graphs lazy; the graph itself is not converted or modified. The Ask AI section reuses GraphRAG retrieval: it can scope to an analyzed document's saved text and candidates or query across approved graph evidence. The assistant cites only source IDs returned by graph retrieval.
 
 ## Tests and honest reporting
 
@@ -219,6 +219,7 @@ Uploads are stored under `data/uploads/`, extracted text/document metadata under
 python -m pytest -q
 python -m compileall -q knowledge_graph_builder tests
 node --check knowledge_graph_builder/static/app.js
+node --test tests/test_graph_explorer.js
 ```
 
 Fast tests cover actual parameter updates, checkpoint reload/inference, deterministic and fixed dataset splits, DocRED/CoNLL/FEVER preparation, GNN leakage and negative sampling, head/tail ranking metrics, API validation/background jobs, graph persistence, evidence provenance, and frontend serving. Transformer-download integration tests are not run by the default suite; the local tiny-config tests exercise actual model optimization without external downloads.

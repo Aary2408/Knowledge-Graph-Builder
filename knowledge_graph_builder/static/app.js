@@ -1,6 +1,7 @@
 const state = {
   page: "home",
   graph: null,
+  graphStatus: "loading",
   documents: [],
   datasets: [],
   models: { nlp: [], nlp_by_task: { ner: [], relation: [] }, nlp_checkpoints: [], gnn: [], nli: [] },
@@ -10,6 +11,16 @@ const state = {
   selectedDocument: null,
   processing: false,
   documentAnswer: null,
+  graphExplorer: {
+    model: null,
+    expanded: new Set(),
+    autoExpanded: new Set(),
+    collapsed: new Set(),
+    connectionLimits: new Map(),
+    rootLimits: new Map(),
+    viewport: { x: 28, y: 30, scale: 1 },
+    drag: null,
+  },
   chat: [],
 };
 
@@ -102,7 +113,12 @@ async function refreshState() {
     $("#sidebar-status").textContent = "Could not reach Flask API";
     $(".environment-pill .status-dot").classList.add("error");
   }
-  if (results[1].status === "fulfilled") state.graph = results[1].value;
+  if (results[1].status === "fulfilled") {
+    state.graph = results[1].value;
+    state.graphStatus = "ready";
+  } else {
+    state.graphStatus = "error";
+  }
   if (results[2].status === "fulfilled") state.documents = results[2].value.documents || [];
   if (results[3].status === "fulfilled") state.datasets = results[3].value.datasets || [];
   if (results[4].status === "fulfilled") state.models = results[4].value;
@@ -128,7 +144,7 @@ async function renderPage() {
     switch (state.page) {
       case "home":
       case "overview": root.innerHTML = await renderOverview(); break;
-      case "graph": root.innerHTML = renderGraph(); bindGraph(); break;
+      case "graph": root.innerHTML = renderGraph(); bindGraphExplorer(); break;
       case "documents": root.innerHTML = renderDocuments(); break;
       case "ask-ai": root.innerHTML = renderAssistant(); break;
       case "advanced-lab": root.innerHTML = renderAdvancedLab(); break;
@@ -169,180 +185,307 @@ function documentUploadPanel() {
     </form></article>`;
 }
 
-function relationRows(relations) {
-  if (!relations.length) return emptyState("⌘", "No graph relationships", "Add verified or observed facts to see them in the graph.");
-  return `<div class="table-wrap"><table><thead><tr><th>Subject</th><th>Predicate</th><th>Object</th><th>Type</th><th>Source</th></tr></thead><tbody>${relations.map((relation) => `
-    <tr><td class="cell-primary">${escapeHTML(relation.subject)}</td><td>${escapeHTML(relation.predicate)}</td><td class="cell-primary">${escapeHTML(relation.object)}</td><td>${badge(relation.relation_type)}</td><td>${escapeHTML(relation.provenance?.document_id || relation.source || "—")}</td></tr>`).join("")}</tbody></table></div>`;
-}
-
 function renderGraph() {
-  const relations = state.graph?.relations || [];
-  const entityTypes = [...new Set((state.graph?.entities || []).map((item) => item.attributes?.entity_type || item.attributes?.type).filter(Boolean))];
-  return `${pageHeading("Knowledge graph", "Explore entities and source-backed relationships. Predicted edges are visually distinct from reviewed facts.",
-    `<button class="button" data-action="reload">↻ Refresh graph</button>`)}
-    <div class="card">
-      <div class="card-header"><div><h2>Graph explorer</h2><p>${formatNumber(state.graph?.entities?.length || 0)} entities · ${formatNumber(relations.length)} relationships</p></div>
-        <div class="inline-form"><input class="search-input" id="graph-search" placeholder="Search entities or predicates"><select id="entity-filter" class="search-input" aria-label="Filter entity type"><option value="">All entity types</option>${entityTypes.map((name) => `<option>${escapeHTML(name)}</option>`).join("")}</select><select id="graph-filter" class="search-input" aria-label="Filter relationship type"><option value="">All relationship types</option>${[...new Set(relations.map((row) => row.relation_type))].map((name) => `<option>${escapeHTML(name)}</option>`).join("")}</select></div>
+  const heading = pageHeading("Knowledge graph", "Follow connected entities through a hierarchical relationship tree. The stored graph remains unchanged.",
+    `<button class="button" data-action="reload">↻ Refresh graph</button>`);
+  if (state.graphStatus === "loading") {
+    return `${heading}<div class="card loading-state"><span class="spinner"></span>Loading graph entities and relationships…</div>`;
+  }
+  if (state.graphStatus === "error") {
+    return `${heading}<div class="error-state">Could not load graph data. <button class="button small" data-action="reload">Retry</button></div>`;
+  }
+  const explorer = window.KnowGraphExplorer;
+  state.graphExplorer.model = explorer.buildModel(state.graph);
+  const model = state.graphExplorer.model;
+  const categories = explorer.CATEGORY_ORDER.filter((category) =>
+    [...model.entities.values()].some((entity) => explorer.entityCategory(entity) === category)
+  );
+  const predicates = [...new Set(model.relations.map((relation) => relation.predicate).filter(Boolean))].sort();
+  const sources = [...new Set(model.relations.map(explorer.relationSource).filter(Boolean))].sort();
+  const options = (values) => values.map((value) => `<option value="${escapeHTML(value)}">${escapeHTML(value)}</option>`).join("");
+  return `${heading}
+    <section class="graph-explorer">
+      <div class="explorer-toolbar">
+        <label class="explorer-search"><span aria-hidden="true">⌕</span><input id="graph-search" type="search" placeholder="Search entity names…" aria-label="Search entities"></label>
+        <select id="graph-type-filter" class="explorer-filter" aria-label="Filter entity type"><option value="">All entity types</option>${options(categories)}</select>
+        <select id="graph-relation-filter" class="explorer-filter" aria-label="Filter relationship type"><option value="">All relationships</option>${options(predicates)}</select>
+        <select id="graph-source-filter" class="explorer-filter" aria-label="Filter source document"><option value="">All source documents</option>${sources.map((source) => `<option value="${escapeHTML(source)}">${escapeHTML(explorerSourceLabel(source))}</option>`).join("")}</select>
+        <div class="explorer-actions"><button class="button small" data-action="explorer-expand-all">Expand all</button><button class="button small" data-action="explorer-collapse-all">Collapse all</button></div>
       </div>
-      <div class="graph-toolbar-legend"><span><i class="legend-dot"></i>Observed or human-reviewed</span><span><i class="legend-dot predicted"></i>Predicted / candidate</span><span>Scroll to zoom · drag to pan · click an edge for evidence</span></div>
-      <div class="graph-layout"><div class="graph-canvas"><div class="graph-toolbar"><button class="button" data-action="graph-reset">Reset view</button></div><svg id="graph-svg" viewBox="0 0 800 480" role="img" aria-label="Interactive knowledge graph"></svg></div>
-      <aside class="card" id="entity-details">${emptyState("◉", "Select an entity", "Click a graph node to inspect its relationships and source provenance.")}</aside></div>
-      <div class="section-gap"><div class="section-label">Stored relationships</div><div id="graph-table">${relationRows(relations)}</div></div>
-    </div>`;
+      <div class="explorer-summary"><span><strong>${formatNumber(model.entities.size)}</strong> entities</span><span>${formatNumber(model.relations.length)} relationships</span><span id="explorer-result-count"></span></div>
+      <nav class="explorer-breadcrumb" id="graph-breadcrumb" aria-label="Entity navigation path"></nav>
+      <div class="explorer-layout">
+        <section class="card explorer-tree-panel" aria-label="Entity tree">
+          <div class="explorer-panel-heading"><div><h2>Relationship tree</h2><p>Cross-links and cycles appear as navigable references.</p></div><span class="badge neutral">${formatNumber(model.roots.length)} roots</span></div>
+          <div class="tree-controls">
+            <span class="tree-pan-hint">Drag to pan · Scroll to zoom</span>
+            <div class="tree-zoom-controls" role="group" aria-label="Tree zoom controls">
+              <button class="icon-button" data-action="explorer-zoom-out" aria-label="Zoom out" title="Zoom out">−</button>
+              <button class="icon-button" data-action="explorer-zoom-reset" aria-label="Reset tree zoom" title="Reset zoom">⟲</button>
+              <button class="icon-button" data-action="explorer-zoom-in" aria-label="Zoom in" title="Zoom in">+</button>
+            </div>
+          </div>
+          <div class="tree-viewport" id="tree-viewport" aria-label="Zoomable relationship tree">
+            <div class="tree-stage" id="tree-stage"><div class="explorer-tree" id="entity-tree" role="tree"></div></div>
+          </div>
+        </section>
+        <aside class="card explorer-details" id="entity-details" aria-label="Entity details">${emptyState("◉", "Select an entity", "Choose a tree item or relationship reference to inspect graph details and provenance.")}</aside>
+      </div>
+    </section>`;
 }
 
-function graphFilteredRelations() {
-  const query = ($("#graph-search")?.value || "").trim().toLowerCase();
-  const type = $("#graph-filter")?.value || "";
-  const entityType = $("#entity-filter")?.value || "";
-  const nodeById = new Map((state.graph?.entities || []).map((item) => [item.entity_id, item]));
-  return (state.graph?.relations || []).filter((relation) =>
-    (!type || relation.relation_type === type)
-    && (!entityType || [relation.subject, relation.object].some((entity) => {
-      const node = nodeById.get(entity);
-      return (node?.attributes?.entity_type || node?.attributes?.type) === entityType;
-    }))
-    && (!query || `${relation.subject} ${relation.predicate} ${relation.object}`.toLowerCase().includes(query)));
+function explorerSourceLabel(source) {
+  const doc = state.documents.find((item) => item.document_id === source);
+  return doc ? `${doc.filename || doc.document_id} · ${source}` : source;
 }
 
-function bindGraph() {
-  const search = $("#graph-search");
-  const filter = $("#graph-filter");
-  const entityFilter = $("#entity-filter");
-  if (!search) return;
+function bindGraphExplorer() {
+  if (!$("#tree-viewport")) return;
   const update = () => {
-    const relations = graphFilteredRelations();
-    $("#graph-table").innerHTML = relationRows(relations);
-    drawGraph(relations);
+    state.graphExplorer.collapsed.clear();
+    renderGraphTree();
   };
-  search.addEventListener("input", update);
-  filter.addEventListener("change", update);
-  entityFilter.addEventListener("change", update);
-  drawGraph(graphFilteredRelations());
-  const svg = $("#graph-svg");
-  svg.addEventListener("wheel", (event) => {
+  ["graph-search", "graph-type-filter", "graph-relation-filter", "graph-source-filter"].forEach((id) => {
+    const control = $(`#${id}`);
+    control.addEventListener(id === "graph-search" ? "input" : "change", update);
+  });
+  bindTreeViewport();
+  renderGraphTree();
+  if (state.selectedEntity) renderExplorerDetails(state.selectedEntity);
+}
+
+function updateTreeTransform() {
+  const stage = $("#tree-stage");
+  if (!stage) return;
+  const { x, y, scale } = state.graphExplorer.viewport;
+  stage.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
+}
+
+function zoomTree(factor, clientX, clientY) {
+  const viewport = $("#tree-viewport");
+  if (!viewport) return;
+  const rect = viewport.getBoundingClientRect();
+  const localX = clientX == null ? rect.width / 2 : clientX - rect.left;
+  const localY = clientY == null ? rect.height / 2 : clientY - rect.top;
+  const view = state.graphExplorer.viewport;
+  const scale = Math.min(2.4, Math.max(.35, view.scale * factor));
+  const contentX = (localX - view.x) / view.scale;
+  const contentY = (localY - view.y) / view.scale;
+  state.graphExplorer.viewport = {
+    x: localX - contentX * scale,
+    y: localY - contentY * scale,
+    scale,
+  };
+  updateTreeTransform();
+}
+
+function bindTreeViewport() {
+  const viewport = $("#tree-viewport");
+  if (!viewport) return;
+  updateTreeTransform();
+  viewport.addEventListener("wheel", (event) => {
     event.preventDefault();
-    const view = state.graphViewport || { x: 0, y: 0, width: 800, height: 480 };
-    const rect = svg.getBoundingClientRect();
-    const px = (event.clientX - rect.left) / rect.width;
-    const py = (event.clientY - rect.top) / rect.height;
-    const scale = event.deltaY < 0 ? 0.88 : 1.14;
-    const width = Math.min(1600, Math.max(260, view.width * scale));
-    const height = width * 0.6;
-    state.graphViewport = {
-      x: view.x + px * (view.width - width),
-      y: view.y + py * (view.height - height),
-      width,
-      height,
-    };
-    svg.setAttribute("viewBox", `${state.graphViewport.x} ${state.graphViewport.y} ${width} ${height}`);
+    zoomTree(event.deltaY < 0 ? 1.12 : 1 / 1.12, event.clientX, event.clientY);
   }, { passive: false });
-  svg.addEventListener("pointerdown", (event) => {
-    if (event.target.closest(".graph-node")) return;
-    state.graphPan = {
-      pointer: event.pointerId,
+  viewport.addEventListener("pointerdown", (event) => {
+    if (event.target.closest("[data-action]")) return;
+    state.graphExplorer.drag = {
+      pointerId: event.pointerId,
       x: event.clientX,
       y: event.clientY,
-      view: state.graphViewport || { x: 0, y: 0, width: 800, height: 480 },
+      viewX: state.graphExplorer.viewport.x,
+      viewY: state.graphExplorer.viewport.y,
     };
-    svg.setPointerCapture(event.pointerId);
+    viewport.classList.add("is-panning");
+    viewport.setPointerCapture(event.pointerId);
+    event.preventDefault();
   });
-  svg.addEventListener("pointermove", (event) => {
-    if (!state.graphPan || state.graphPan.pointer !== event.pointerId) return;
-    const rect = svg.getBoundingClientRect();
-    const dx = (event.clientX - state.graphPan.x) * state.graphPan.view.width / rect.width;
-    const dy = (event.clientY - state.graphPan.y) * state.graphPan.view.height / rect.height;
-    state.graphViewport = { ...state.graphPan.view, x: state.graphPan.view.x - dx, y: state.graphPan.view.y - dy };
-    const view = state.graphViewport;
-    svg.setAttribute("viewBox", `${view.x} ${view.y} ${view.width} ${view.height}`);
+  viewport.addEventListener("pointermove", (event) => {
+    const drag = state.graphExplorer.drag;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    state.graphExplorer.viewport.x = drag.viewX + event.clientX - drag.x;
+    state.graphExplorer.viewport.y = drag.viewY + event.clientY - drag.y;
+    updateTreeTransform();
   });
-  svg.addEventListener("pointerup", () => { state.graphPan = null; });
-  svg.addEventListener("pointercancel", () => { state.graphPan = null; });
+  const stopDragging = () => {
+    state.graphExplorer.drag = null;
+    viewport.classList.remove("is-panning");
+  };
+  viewport.addEventListener("pointerup", stopDragging);
+  viewport.addEventListener("pointercancel", stopDragging);
 }
 
-function drawGraph(relations) {
-  const svg = $("#graph-svg");
-  if (!svg) return;
-  const query = ($("#graph-search")?.value || "").trim().toLowerCase();
-  const entityType = $("#entity-filter")?.value || "";
-  const entityNodes = (state.graph?.entities || []).filter((item) => {
-    const type = item.attributes?.entity_type || item.attributes?.type;
-    return (!query || `${item.label} ${item.entity_id}`.toLowerCase().includes(query))
-      && (!entityType || type === entityType);
-  }).map((item) => item.entity_id);
-  const allEntities = [...new Set([
-    ...relations.flatMap((relation) => [relation.subject, relation.object]),
-    ...entityNodes,
-  ])];
-  const degree = new Map(allEntities.map((entity) => [entity, 0]));
-  relations.forEach((relation) => {
-    degree.set(relation.subject, (degree.get(relation.subject) || 0) + 1);
-    degree.set(relation.object, (degree.get(relation.object) || 0) + 1);
-  });
-  const entities = allEntities.length > 80
-    ? [...allEntities].sort((a, b) => degree.get(b) - degree.get(a) || a.localeCompare(b)).slice(0, 80)
-    : allEntities;
-  const visibleEntitySet = new Set(entities);
-  const displayedRelations = relations.filter((relation) =>
-    visibleEntitySet.has(relation.subject) && visibleEntitySet.has(relation.object));
-  const view = state.graphViewport || { x: 0, y: 0, width: 800, height: 480 };
-  svg.setAttribute("viewBox", `${view.x} ${view.y} ${view.width} ${view.height}`);
-  if (!entities.length) {
-    svg.innerHTML = `<text x="400" y="235" text-anchor="middle" fill="#8991a1" font-size="12">No matching entities or relationships</text>`;
+function explorerFilters() {
+  return {
+    query: $("#graph-search")?.value || "",
+    type: $("#graph-type-filter")?.value || "",
+    predicate: $("#graph-relation-filter")?.value || "",
+    source: $("#graph-source-filter")?.value || "",
+  };
+}
+
+function renderGraphTree() {
+  const model = state.graphExplorer.model;
+  const tree = $("#entity-tree");
+  if (!model || !tree) return;
+  const explorer = window.KnowGraphExplorer;
+  const filters = explorerFilters();
+  const hasFilters = Object.values(filters).some(Boolean);
+  const { matches, relevant } = explorer.matchingBranches(model, filters);
+  const autoExpanded = new Set();
+  const revealPath = (id) => {
+    let cursor = id;
+    while (model.parentByEntity.has(cursor)) {
+      cursor = model.parentByEntity.get(cursor).entityId;
+      autoExpanded.add(cursor);
+    }
+  };
+  matches.forEach(revealPath);
+  if (state.selectedEntity) revealPath(state.selectedEntity);
+  state.graphExplorer.autoExpanded = autoExpanded;
+  const labels = {
+    People: ["●", "people"],
+    Organizations: ["▦", "organizations"],
+    Locations: ["⌖", "locations"],
+    Concepts: ["✦", "concepts"],
+    Events: ["◷", "events"],
+    Other: ["◇", "other"],
+  };
+  const renderBranch = (id, ancestorIds = new Set()) => {
+    const entity = model.entities.get(id);
+    const category = explorer.entityCategory(entity);
+    const categoryIcon = labels[category];
+    const connectionLimit = state.graphExplorer.connectionLimits.get(id) || 60;
+    const connectionPage = explorer.visibleConnections(
+      model,
+      id,
+      connectionLimit,
+      0,
+      (connection) => relevant.has(connection.targetId)
+    );
+    const children = connectionPage.connections;
+    const expanded = explorer.isExpanded(
+      id,
+      state.graphExplorer.expanded,
+      autoExpanded,
+      state.graphExplorer.collapsed
+    );
+    const ancestors = new Set(ancestorIds);
+    ancestors.add(id);
+    const relationBranches = expanded ? children.map(({ targetId, links }) => {
+      const target = model.entities.get(targetId);
+      const isTreeChild = model.parentByEntity.get(targetId)?.entityId === id && !ancestors.has(targetId);
+      const edgeMarkup = links.map(({ relation, direction }) =>
+        `<span class="relationship-label" title="${escapeHTML(`${direction}: ${relation.subject} ${relation.predicate} ${relation.object}`)}">${direction === "outgoing" ? "→" : "←"} ${escapeHTML(relation.predicate || "related")}</span>`
+      ).join("");
+      const connectedEntity = isTreeChild
+        ? renderBranch(targetId, ancestors)
+        : `<button class="entity-reference" data-action="explorer-reference" data-id="${escapeHTML(targetId)}" title="Navigate to ${escapeHTML(target?.label || targetId)}">↗ ${escapeHTML(target?.label || targetId)}</button>`;
+      return `<div class="tree-child" role="treeitem"><div class="tree-connection-labels">${edgeMarkup}</div>${connectedEntity}</div>`;
+    }).join("") : "";
+    const moreConnections = expanded && connectionPage.hasMore
+      ? `<button class="tree-load-more" data-action="explorer-more-connections" data-id="${escapeHTML(id)}">Show ${Math.min(60, connectionPage.total - connectionLimit)} more connections</button>`
+      : "";
+    return `<div class="tree-node type-${categoryIcon[1]} ${state.selectedEntity === id ? "entity-selected" : ""}" role="treeitem" aria-expanded="${expanded}">
+      <div class="tree-node-card ${matches.has(id) ? "entity-match" : ""}">
+        <button class="tree-node-select" data-action="explorer-select" data-id="${escapeHTML(id)}">
+          <span class="tree-node-type type-${categoryIcon[1]}" aria-hidden="true">${categoryIcon[0]}</span>
+          <span class="tree-node-copy"><strong>${escapeHTML(entity.label || id)}</strong><small>${escapeHTML(id)}</small></span>
+          <span class="entity-type-badge type-${categoryIcon[1]}">${escapeHTML(category)}</span>
+        </button>
+        <button class="tree-node-toggle" data-action="explorer-toggle" data-id="${escapeHTML(id)}" aria-label="${expanded ? "Collapse" : "Expand"} ${escapeHTML(entity.label || id)}" aria-expanded="${expanded}" ${connectionPage.total ? "" : "disabled"}>${connectionPage.total ? (expanded ? "−" : "+") : "·"}</button>
+      </div>
+      ${expanded && relationBranches ? `<div class="tree-descendants"><div class="tree-child-rail ${children.length === 1 ? "single-child" : ""}">${relationBranches}</div>${moreConnections}</div>` : ""}
+    </div>`;
+  };
+
+  const categoryMarkup = explorer.CATEGORY_ORDER.map((category) => {
+    const roots = model.rootsByCategory.get(category).filter((id) => relevant.has(id));
+    if (!roots.length) return "";
+    const [icon, colorClass] = labels[category];
+    const rootLimit = state.graphExplorer.rootLimits.get(category) || 80;
+    const prioritized = hasFilters
+      ? [...roots].sort((left, right) => Number(matches.has(right)) - Number(matches.has(left)))
+      : roots;
+    const shownRoots = prioritized.slice(0, rootLimit);
+    const moreRoots = roots.length > rootLimit
+      ? `<button class="tree-load-more" data-action="explorer-more-roots" data-category="${escapeHTML(category)}">Show ${Math.min(80, roots.length - rootLimit)} more roots</button>`
+      : "";
+    return `<section class="entity-group" role="group"><h3><span class="entity-type-icon type-${colorClass}" aria-hidden="true">${icon}</span>${escapeHTML(category)}<small>${formatNumber(roots.length)} roots</small></h3><div class="tree-root-rail">${shownRoots.map((id) => renderBranch(id)).join("")}</div>${moreRoots}</section>`;
+  }).join("");
+  tree.innerHTML = categoryMarkup || emptyState("⌕", model.entities.size ? "No matching entities" : "This graph is empty", model.entities.size ? "Adjust or clear the search and filters to see more entities." : "Entities and their relationships will appear here when the graph contains data.");
+  $("#explorer-result-count").textContent = hasFilters ? `${formatNumber(matches.size)} matching entities` : "";
+  renderExplorerBreadcrumb();
+}
+
+function renderExplorerBreadcrumb() {
+  const node = $("#graph-breadcrumb");
+  if (!node) return;
+  const model = state.graphExplorer.model;
+  const current = state.selectedEntity;
+  if (!current || !model?.entities.has(current)) {
+    node.innerHTML = `<span>All entities</span>`;
     return;
   }
-  const positions = new Map(entities.map((entity, index) => {
-    const angle = -Math.PI / 2 + (2 * Math.PI * index / entities.length);
-    return [entity, { x: 400 + Math.cos(angle) * Math.min(290, 90 + entities.length * 9), y: 240 + Math.sin(angle) * Math.min(170, 55 + entities.length * 5) }];
-  }));
-  const edges = displayedRelations.map((relation, index) => {
-    const start = positions.get(relation.subject);
-    const end = positions.get(relation.object);
-    const predicted = ["predicted", "candidate", "model_prediction"].includes(relation.relation_type);
-    return `<g class="graph-edge-group" data-relation-index="${index}" tabindex="0" role="button" aria-label="${escapeHTML(`${relation.subject} ${relation.predicate} ${relation.object}`)}"><line class="graph-edge ${predicted ? "predicted" : ""}" x1="${start.x}" y1="${start.y}" x2="${end.x}" y2="${end.y}" marker-end="url(#graph-arrow)"/><text class="graph-edge-label" x="${(start.x + end.x) / 2}" y="${(start.y + end.y) / 2 - 4}" text-anchor="middle">${escapeHTML(relation.predicate.replaceAll("_", " "))}</text></g>`;
-  }).join("");
-  const nodes = entities.map((entity) => {
-    const point = positions.get(entity);
-    const node = (state.graph?.entities || []).find((item) => item.entity_id === entity);
-    const label = node?.label || entity;
-    const display = label.length > 18 ? `${label.slice(0, 16)}…` : label;
-    return `<g class="graph-node ${state.selectedEntity === entity ? "selected" : ""}" data-entity="${escapeHTML(entity)}" transform="translate(${point.x} ${point.y})" tabindex="0" role="button" aria-label="Inspect entity ${escapeHTML(label)}"><circle r="18"/><text text-anchor="middle" y="33">${escapeHTML(display)}</text></g>`;
-  }).join("");
-  const graphNote = allEntities.length > 80
-    ? `<text x="400" y="466" text-anchor="middle" fill="#667085" font-size="11">Showing the 80 most-connected of ${allEntities.length} entities. Search or filter to narrow the graph.</text>`
-    : !displayedRelations.length
-      ? `<text x="400" y="466" text-anchor="middle" fill="#667085" font-size="11">Entities found, but no confidently extracted relationships are available to connect them.</text>`
-      : "";
-  svg.innerHTML = `<defs><marker id="graph-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#8790a3"/></marker></defs><g id="graph-viewport">${edges}${nodes}</g>${graphNote}`;
-  $$(".graph-node", svg).forEach((node) => {
-    node.addEventListener("click", () => selectEntity(node.dataset.entity));
-    node.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        selectEntity(node.dataset.entity);
-      }
-    });
-  });
-  $$(".graph-edge-group", svg).forEach((edge) => {
-    const select = () => selectRelation(displayedRelations[Number(edge.dataset.relationIndex)]);
-    edge.addEventListener("click", select);
-    edge.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        select();
-      }
-    });
-  });
+  const path = [current];
+  let cursor = current;
+  while (model.parentByEntity.has(cursor)) {
+    cursor = model.parentByEntity.get(cursor).entityId;
+    path.unshift(cursor);
+  }
+  node.innerHTML = `<button data-action="explorer-clear-selection">All entities</button>${path.map((id, index) =>
+    `${index ? '<span aria-hidden="true">›</span>' : ""}<button data-action="explorer-select" data-id="${escapeHTML(id)}" ${index === path.length - 1 ? 'aria-current="page"' : ""}>${escapeHTML(model.entities.get(id).label || id)}</button>`
+  ).join("")}`;
 }
 
-function selectEntity(entity) {
-  state.selectedEntity = entity;
-  const relations = (state.graph?.relations || []).filter((item) => item.subject === entity || item.object === entity);
-  const node = (state.graph?.entities || []).find((item) => item.entity_id === entity);
-  $("#entity-details").innerHTML = `<div class="card-header"><div><div class="eyebrow">ENTITY</div><h2>${escapeHTML(node?.label || entity)}</h2></div></div>
-    <div class="section-label section-gap">Relationships (${relations.length})</div>
-    ${relations.length ? relations.map((row) => `<div class="detail-row"><small>${escapeHTML(row.subject === entity ? "Outgoing" : "Incoming")} · ${escapeHTML(row.predicate)}</small><span>${escapeHTML(row.subject)} → ${escapeHTML(row.object)}</span><span>${badge(row.relation_type)}</span><span class="muted">${escapeHTML(row.provenance?.document_id || row.source || "No source recorded")}</span>${row.provenance?.snippet ? `<div class="evidence-block section-gap">${escapeHTML(row.provenance.snippet)}</div>` : ""}${row.provenance?.evidence?.length ? row.provenance.evidence.map((item) => `<div class="evidence-block section-gap">${escapeHTML(item.snippet)}<small>${escapeHTML(item.page ? `Page ${item.page}` : "")}</small></div>`).join("") : ""}<details class="technical-details"><summary>Technical details</summary><span class="mono">${escapeHTML(JSON.stringify({ entity_id: entity, attributes: node?.attributes || {}, provenance: row.provenance || {} }))}</span></details></div>`).join("") : emptyState("↔", "No relationships", "This entity has no stored edges.")}`;
-  drawGraph(graphFilteredRelations());
+function renderExplorerDetails(entityId) {
+  const details = $("#entity-details");
+  const model = state.graphExplorer.model;
+  const entity = model?.entities.get(entityId);
+  if (!details || !entity) return;
+  const explorer = window.KnowGraphExplorer;
+  const attributes = entity.attributes || {};
+  const description = attributes.description || attributes.summary || "";
+  const rawType = explorer.entityType(entity);
+  const connected = model.incidentByEntity.get(entityId) || [];
+  const renderRelationship = (relation, incoming) => {
+    const connectedId = incoming ? relation.subject : relation.object;
+    const connectedEntity = model.entities.get(connectedId);
+    const source = explorer.relationSource(relation);
+    const document = state.documents.find((item) => item.document_id === source);
+    return `<article class="detail-relationship">
+      <div class="detail-relationship-heading"><span class="relationship-label">${incoming ? "←" : "→"} ${escapeHTML(relation.predicate || "related")}</span>${badge(relation.relation_type)}</div>
+      <button class="connected-entity" data-action="explorer-reference" data-id="${escapeHTML(connectedId)}">${escapeHTML(connectedEntity?.label || connectedId)}</button>
+      <div class="detail-source">Source: ${escapeHTML(document?.filename || source || "Not recorded")}${source && document ? ` · ${escapeHTML(source)}` : ""}${relation.confidence != null ? ` · confidence ${escapeHTML(relation.confidence)}` : ""}</div>
+      ${relation.provenance?.snippet ? `<div class="evidence-block">${escapeHTML(relation.provenance.snippet)}</div>` : ""}
+      ${relation.provenance && Object.keys(relation.provenance).some((key) => !["document_id", "snippet"].includes(key))
+        ? `<details class="provenance-extra"><summary>More provenance</summary><pre>${escapeHTML(JSON.stringify(Object.fromEntries(Object.entries(relation.provenance).filter(([key]) => !["document_id", "snippet"].includes(key))), null, 2))}</pre></details>` : ""}
+    </article>`;
+  };
+  const outgoing = model.relations.filter((relation) => relation.subject === entityId);
+  const incoming = model.relations.filter((relation) => relation.object === entityId && relation.subject !== entityId);
+  const properties = Object.fromEntries(Object.entries(attributes).filter(([key]) =>
+    !["type", "entity_type", "entityType", "category", "description", "summary"].includes(key)
+  ));
+  details.innerHTML = `<header class="entity-detail-heading">
+    <div class="eyebrow">ENTITY DETAILS</div><h2>${escapeHTML(entity.label || entityId)}</h2>
+    <span class="entity-type-badge type-${explorer.entityCategory(entity).toLowerCase()}">${escapeHTML(rawType || "Other")}</span>
+  </header>
+  <div class="detail-row"><small>Entity ID</small><span class="mono">${escapeHTML(entityId)}</span></div>
+  ${description ? `<div class="detail-row"><small>Description</small><span>${escapeHTML(description)}</span></div>` : ""}
+  ${Object.keys(properties).length ? `<div class="detail-row"><small>Properties</small><pre class="entity-properties">${escapeHTML(JSON.stringify(properties, null, 2))}</pre></div>` : ""}
+  <div class="entity-detail-counts"><span><strong>${formatNumber(outgoing.length)}</strong> outgoing</span><span><strong>${formatNumber(incoming.length)}</strong> incoming</span><span><strong>${formatNumber(connected.length)}</strong> connections</span></div>
+  <section class="detail-relations"><h3>Outgoing relationships</h3>${outgoing.length ? outgoing.map((relation) => renderRelationship(relation, false)).join("") : `<p class="detail-empty">No outgoing relationships.</p>`}</section>
+  <section class="detail-relations"><h3>Incoming relationships</h3>${incoming.length ? incoming.map((relation) => renderRelationship(relation, true)).join("") : `<p class="detail-empty">No incoming relationships.</p>`}</section>`;
+  renderExplorerBreadcrumb();
+}
+
+function selectExplorerEntity(entityId) {
+  if (!state.graphExplorer.model?.entities.has(entityId)) return;
+  state.selectedEntity = entityId;
+  state.graphExplorer.collapsed.clear();
+  renderExplorerDetails(entityId);
+  renderGraphTree();
 }
 
 function selectRelation(relation) {
@@ -762,10 +905,74 @@ document.addEventListener("click", async (event) => {
   }
   const action = event.target.closest("[data-action]");
   if (!action) return;
+  if (action.dataset.action.startsWith("explorer-")) {
+    switch (action.dataset.action) {
+      case "explorer-select":
+        selectExplorerEntity(action.dataset.id);
+        return;
+      case "explorer-reference":
+        state.graphExplorer.expanded.add(action.dataset.id);
+        selectExplorerEntity(action.dataset.id);
+        return;
+      case "explorer-toggle": {
+        const id = action.dataset.id;
+        window.KnowGraphExplorer.toggleExpanded(
+          id,
+          state.graphExplorer.expanded,
+          state.graphExplorer.autoExpanded,
+          state.graphExplorer.collapsed
+        );
+        renderGraphTree();
+        return;
+      }
+      case "explorer-expand-all":
+        state.graphExplorer.collapsed.clear();
+        state.graphExplorer.model?.entities.forEach((_entity, id) => {
+          state.graphExplorer.expanded.add(id);
+          state.graphExplorer.connectionLimits.set(id, Number.MAX_SAFE_INTEGER);
+        });
+        state.graphExplorer.model?.rootsByCategory.forEach((roots, category) => {
+          state.graphExplorer.rootLimits.set(category, roots.length);
+        });
+        renderGraphTree();
+        return;
+      case "explorer-collapse-all":
+        state.graphExplorer.expanded.clear();
+        state.graphExplorer.collapsed = new Set(state.graphExplorer.autoExpanded);
+        renderGraphTree();
+        return;
+      case "explorer-more-connections": {
+        const id = action.dataset.id;
+        state.graphExplorer.connectionLimits.set(id, (state.graphExplorer.connectionLimits.get(id) || 60) + 60);
+        renderGraphTree();
+        return;
+      }
+      case "explorer-more-roots": {
+        const category = action.dataset.category;
+        state.graphExplorer.rootLimits.set(category, (state.graphExplorer.rootLimits.get(category) || 80) + 80);
+        renderGraphTree();
+        return;
+      }
+      case "explorer-zoom-in":
+        zoomTree(1.2);
+        return;
+      case "explorer-zoom-out":
+        zoomTree(1 / 1.2);
+        return;
+      case "explorer-zoom-reset":
+        state.graphExplorer.viewport = { x: 28, y: 30, scale: 1 };
+        updateTreeTransform();
+        return;
+      case "explorer-clear-selection":
+        state.selectedEntity = null;
+        $("#entity-details").innerHTML = emptyState("◉", "Select an entity", "Choose a tree item or relationship reference to inspect graph details and provenance.");
+        renderGraphTree();
+        return;
+    }
+  }
   try {
     switch (action.dataset.action) {
       case "reload": await refreshState(); toast("Workspace data refreshed."); break;
-      case "graph-reset": state.selectedEntity = null; state.graphViewport = null; drawGraph(graphFilteredRelations()); $("#entity-details").innerHTML = emptyState("◉", "Select an entity", "Click a graph node to inspect its relationships and source provenance."); break;
       case "open-document": {
         state.selectedDocument = (await api(`/documents/${encodeURIComponent(action.dataset.id)}`)).document;
         state.documentAnswer = null;
